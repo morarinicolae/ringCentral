@@ -9,7 +9,7 @@ import { SendSmsResult } from '../types';
 
 let cachedToken: { accessToken: string; expiresAt: number } | null = null;
 
-async function getAccessToken(): Promise<string> {
+export async function getAccessToken(): Promise<string> {
   const now = Date.now();
   if (cachedToken && cachedToken.expiresAt > now + 60_000) {
     return cachedToken.accessToken;

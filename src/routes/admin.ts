@@ -4,9 +4,15 @@ import { prisma } from '../db';
 import { requireAdmin } from '../middleware/auth';
 import { writeAudit } from '../services/audit';
 import { logger } from '../logger';
+import { ringCentralDiagnostic } from '../services/ringcentral-connect';
 
 export const adminRouter = Router();
 adminRouter.use(requireAdmin);
+
+/** GET /admin/ringcentral/test — verify RingCentral credentials + list SMS numbers. */
+adminRouter.get('/ringcentral/test', async (_req, res) => {
+  res.json(await ringCentralDiagnostic());
+});
 
 /** GET /admin/conversations — admin sees everything. */
 adminRouter.get('/conversations', async (_req, res) => {
