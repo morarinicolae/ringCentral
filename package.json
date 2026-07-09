@@ -19,7 +19,8 @@
     "pretest": "prisma generate",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "rc:send": "tsx scripts/ringcentral-send.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
