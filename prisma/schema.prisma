@@ -1,0 +1,147 @@
+// Prisma schema for the private SMS router.
+//
+// SWITCHING TO POSTGRESQL:
+//   1. Change `provider` below from "sqlite" to "postgresql".
+//   2. Set DATABASE_URL to your Postgres URL, e.g.
+//        DATABASE_URL="postgresql://user:pass@host:5432/sms_router?schema=public"
+//   3. Run `npx prisma migrate dev --name init` (or `npx prisma db push`).
+//
+// The schema deliberately avoids Prisma enums and DB-native arrays so the exact
+// same models work on both SQLite (local/testing) and PostgreSQL (production).
+// Status / direction / mode fields are plain strings validated in the app layer
+// (see src/types.ts).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Seller {
+  id                     String    @id @default(cuid())
+  name                   String
+  telegramUserId         String?   @unique @map("telegram_user_id")
+  ringcentralExtensionId String?   @map("ringcentral_extension_id")
+  isActive               Boolean   @default(true) @map("is_active")
+  priority               Int       @default(100)
+  lastAssignedAt         DateTime? @map("last_assigned_at")
+  createdAt              DateTime  @default(now()) @map("created_at")
+  updatedAt              DateTime  @updatedAt @map("updated_at")
+
+  contacts      Contact[]
+  conversations Conversation[]
+  messages      Message[]
+
+  @@index([isActive, priority, id])
+  @@map("sellers")
+}
+
+model Contact {
+  id               String    @id @default(cuid())
+  phoneE164        String    @unique @map("phone_e164")
+  assignedSellerId String?   @map("assigned_seller_id")
+  // status: active | closed | blocked | opt_out
+  status           String    @default("active")
+  firstMessageAt   DateTime? @map("first_message_at")
+  lastMessageAt    DateTime? @map("last_message_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  assignedSeller Seller?        @relation(fields: [assignedSellerId], references: [id])
+  conversations  Conversation[]
+  messages       Message[]
+
+  @@index([assignedSellerId])
+  @@map("contacts")
+}
+
+model Conversation {
+  id               String    @id @default(cuid())
+  contactId        String    @map("contact_id")
+  assignedSellerId String?   @map("assigned_seller_id")
+  // status: open | closed | blocked
+  status           String    @default("open")
+  lastMessageAt    DateTime? @map("last_message_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  contact  Contact   @relation(fields: [contactId], references: [id])
+  seller   Seller?   @relation(fields: [assignedSellerId], references: [id])
+  messages Message[]
+
+  @@index([contactId])
+  @@index([assignedSellerId])
+  @@map("conversations")
+}
+
+model Message {
+  id                   String   @id @default(cuid())
+  conversationId       String   @map("conversation_id")
+  contactId            String   @map("contact_id")
+  sellerId             String?  @map("seller_id")
+  // direction: inbound | outbound
+  direction            String
+  body                 String
+  ringcentralMessageId String?  @unique @map("ringcentral_message_id")
+  telegramMessageId    String?  @map("telegram_message_id")
+  telegramChatId       String?  @map("telegram_chat_id")
+  // status: received | forwarded_to_seller | pending_send | sent | test_sent | failed | duplicate | blocked
+  status               String
+  failureReason        String?  @map("failure_reason")
+  rawPayloadJson       String?  @map("raw_payload_json")
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
+
+  conversation Conversation @relation(fields: [conversationId], references: [id])
+  contact      Contact      @relation(fields: [contactId], references: [id])
+  seller       Seller?      @relation(fields: [sellerId], references: [id])
+
+  @@index([conversationId])
+  @@index([contactId])
+  @@index([telegramChatId, telegramMessageId])
+  @@map("messages")
+}
+
+model RoutingState {
+  id           String   @id @default(cuid())
+  // mode: round_robin (only mode supported today)
+  mode         String   @default("round_robin")
+  lastSellerId String?  @map("last_seller_id")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@map("routing_state")
+}
+
+model WebhookEvent {
+  id              String    @id @default(cuid())
+  // provider: ringcentral | telegram
+  provider        String
+  externalEventId String?   @map("external_event_id")
+  eventHash       String    @unique @map("event_hash")
+  // status: received | processed | duplicate | failed
+  status          String    @default("received")
+  rawPayloadJson  String    @map("raw_payload_json")
+  errorMessage    String?   @map("error_message")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  processedAt     DateTime? @map("processed_at")
+
+  @@map("webhook_events")
+}
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  // actor_type: system | seller | admin
+  actorType   String   @map("actor_type")
+  actorId     String?  @map("actor_id")
+  action      String
+  entityType  String   @map("entity_type")
+  entityId    String?  @map("entity_id")
+  detailsJson String?  @map("details_json")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([entityType, entityId])
+  @@map("audit_logs")
+}
