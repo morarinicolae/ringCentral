@@ -1,0 +1,40 @@
+# Turnkey deploy: the router + Caddy (automatic HTTPS via Let's Encrypt).
+# Point a DNS A record for $APP_DOMAIN at this server, set values in .env,
+# then: `docker compose up -d`. RingCentral + Telegram webhooks then have a
+# public https URL to reach.
+
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Inside the container the app listens on 3000; Caddy proxies to it.
+      PORT: "3000"
+      NODE_ENV: production
+      # SQLite lives on a named volume so data survives restarts.
+      DATABASE_URL: "file:/data/prod.db"
+    volumes:
+      - dbdata:/data
+    expose:
+      - "3000"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  dbdata:
+  caddy_data:
+  caddy_config:

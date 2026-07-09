@@ -30,6 +30,13 @@ export default defineConfig({
       TELEGRAM_BOT_TOKEN: '',
       // Keep retry backoff tiny so failure tests stay fast.
       SMS_RETRY_BASE_MS: '1',
+      // Pin RingCentral vars so a developer's local .env can't leak into the
+      // suite (dotenv never overrides an already-set var).
+      RINGCENTRAL_USE_A2P: 'false',
+      RINGCENTRAL_JWT: '',
+      RINGCENTRAL_CLIENT_ID: 'test-client',
+      RINGCENTRAL_CLIENT_SECRET: 'test-secret',
+      RINGCENTRAL_SERVER_URL: 'https://platform.ringcentral.com',
     },
   },
 });

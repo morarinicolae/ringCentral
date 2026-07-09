@@ -1,0 +1,5 @@
+# Automatic HTTPS reverse proxy. Caddy fetches a Let's Encrypt cert for
+# $APP_DOMAIN on first boot (port 80/443 must be open + DNS pointed here).
+{$APP_DOMAIN} {
+	reverse_proxy app:3000
+}

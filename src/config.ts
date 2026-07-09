@@ -1,6 +1,10 @@
 import dotenv from 'dotenv';
 
-dotenv.config();
+// In tests, rely only on the controlled env from vitest.config so a developer's
+// local .env (real credentials, A2P flags, etc.) can never leak into the suite.
+if (process.env.NODE_ENV !== 'test') {
+  dotenv.config();
+}
 
 function bool(value: string | undefined, fallback = false): boolean {
   if (value === undefined) return fallback;
