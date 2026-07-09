@@ -20,7 +20,7 @@ async function main() {
     `${config.ringcentral.serverUrl}/restapi/v1.0/account/~/extension/~/message-store` +
     `?messageType=SMS&direction=Inbound&dateFrom=${encodeURIComponent(dateFrom)}&perPage=25`;
   const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-  const j = await res.json();
+  const j = (await res.json()) as any;
   const msgs = (j.records || []) as any[];
   console.log(`Found ${msgs.length} inbound SMS since ${dateFrom}`);
 

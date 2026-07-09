@@ -73,17 +73,21 @@ interface RawSendOutcome {
 async function postSmsOnce(from: string, to: string, text: string): Promise<RawSendOutcome> {
   try {
     const token = await getAccessToken();
-    const res = await fetch(`${config.ringcentral.serverUrl}/restapi/v1.0/account/~/extension/~/sms`, {
+    // A2P High Volume SMS (for TCR/10DLC-registered accounts) uses a different
+    // endpoint and body shape (to is an array of plain E.164 strings).
+    const url = config.ringcentral.useA2p
+      ? `${config.ringcentral.serverUrl}/restapi/v1.0/account/~/a2p-sms/messages`
+      : `${config.ringcentral.serverUrl}/restapi/v1.0/account/~/extension/~/sms`;
+    const body = config.ringcentral.useA2p
+      ? { from, to: [to], text }
+      : { from: { phoneNumber: from }, to: [{ phoneNumber: to }], text };
+    const res = await fetch(url, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        from: { phoneNumber: from },
-        to: [{ phoneNumber: to }],
-        text,
-      }),
+      body: JSON.stringify(body),
     });
     const raw = await res.json().catch(() => ({}));
     if (!res.ok) {

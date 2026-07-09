@@ -21,7 +21,7 @@ async function main() {
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ from: { phoneNumber: from }, to: [{ phoneNumber: to }], text }),
   });
-  const json = await res.json();
+  const json = (await res.json()) as any;
   console.log('HTTP', res.status);
   console.log(JSON.stringify(json, null, 2));
   if (!res.ok) process.exit(1);
