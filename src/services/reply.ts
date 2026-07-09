@@ -93,7 +93,7 @@ export async function processSellerReply(msg: ParsedTelegramMessage): Promise<Re
 
   const conversation = await prisma.conversation.findUnique({
     where: { id: notification.conversationId },
-    include: { contact: true },
+    include: { contact: true, line: true },
   });
   if (!conversation || !conversation.contact) {
     await replyToSeller(msg.chatId, MSG_UNKNOWN_CONTEXT, msg.messageId);
@@ -137,11 +137,16 @@ export async function processSellerReply(msg: ParsedTelegramMessage): Promise<Re
     return { handled: true, outcome: 'blocked_ownership', replyText: text, conversationId: conversation.id };
   }
 
+  // Reply goes out FROM the line's own number, so the client sees the same
+  // number they contacted.
+  const fromNumber = conversation.line?.phoneE164 ?? config.ringcentral.fromNumber;
+
   // Record the outbound intent before sending.
   const outbound = await prisma.message.create({
     data: {
       conversationId: conversation.id,
       contactId: contact.id,
+      lineId: conversation.lineId,
       sellerId: seller.id,
       direction: 'outbound',
       body: msg.text,
@@ -152,7 +157,7 @@ export async function processSellerReply(msg: ParsedTelegramMessage): Promise<Re
   });
 
   const result = await sendSms({
-    from: config.ringcentral.fromNumber,
+    from: fromNumber,
     to: contact.phoneE164,
     text: msg.text,
     conversationId: conversation.id,

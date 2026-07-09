@@ -36,6 +36,33 @@ sellerRouter.get('/conversations', async (req, res) => {
 });
 
 /**
+ * GET /seller/calls
+ * Returns ONLY the authenticated seller's calls. A seller can NEVER see another
+ * seller's call log (hard-filtered by req.seller.id).
+ */
+sellerRouter.get('/calls', async (req, res) => {
+  const sellerId = req.seller!.id;
+  const calls = await prisma.call.findMany({
+    where: { sellerId },
+    orderBy: { startedAt: 'desc' },
+    take: 200,
+    include: { contact: true },
+  });
+  res.json({
+    seller_id: sellerId,
+    count: calls.length,
+    calls: calls.map((c) => ({
+      id: c.id,
+      client: c.contact.phoneE164,
+      direction: c.direction,
+      result: c.result,
+      duration_sec: c.durationSec,
+      started_at: c.startedAt,
+    })),
+  });
+});
+
+/**
  * GET /seller/conversations/:id/messages
  * Full message history for one of the seller's own conversations. Ownership is
  * enforced: a request for a conversation the seller doesn't own returns 404

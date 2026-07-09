@@ -2,9 +2,40 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { config } from '../config';
 import { ingestInbounds } from '../services/ingest';
+import { processInboundCall } from '../services/calls';
 import { InboundSms } from '../types';
 
 export const testRouter = Router();
+
+/**
+ * POST /test/simulate-inbound-call
+ * Body: { from, to?, result?, duration_sec?, ringcentral_call_id? }
+ * Simulates a client calling a company number: line resolution -> round-robin
+ * (new caller) / existing seller -> DB record (answered/missed) -> notification.
+ */
+const CallSchema = z.object({
+  from: z.string().min(3),
+  to: z.string().optional(),
+  result: z.string().optional(),
+  duration_sec: z.number().int().optional(),
+  ringcentral_call_id: z.string().optional(),
+});
+testRouter.post('/simulate-inbound-call', async (req, res) => {
+  const parsed = CallSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ ok: false, error: 'invalid_body', details: parsed.error.flatten() });
+    return;
+  }
+  const d = parsed.data;
+  const result = await processInboundCall({
+    from: d.from,
+    to: d.to ?? config.ringcentral.fromNumber,
+    result: d.result ?? 'Accepted',
+    durationSec: d.duration_sec,
+    ringcentralCallId: d.ringcentral_call_id,
+  });
+  res.status(200).json({ ok: result.status !== 'rejected', result });
+});
 
 const SimulateSchema = z.object({
   from: z.string().min(3),
@@ -53,6 +84,8 @@ testRouter.post('/simulate-inbound-sms', async (req, res) => {
           status: result.status,
           duplicate: result.duplicate ?? false,
           is_new_contact: result.isNewContact ?? false,
+          line_id: result.lineId,
+          line_name: result.lineName,
           assigned_seller_id: result.sellerId,
           assigned_seller_name: result.sellerName,
           conversation_id: result.conversationId,

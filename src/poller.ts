@@ -1,5 +1,7 @@
 import { config } from './config';
+import { prisma } from './db';
 import { getAccessToken } from './services/ringcentral';
+import { processInboundCall } from './services/calls';
 import { logger } from './logger';
 
 /**
@@ -14,6 +16,7 @@ import { logger } from './logger';
 const base = () => `http://localhost:${config.port}`;
 let tgOffset = 0;
 const seenSms = new Set<string>();
+const seenCalls = new Set<string>();
 
 export async function pollTelegramOnce(): Promise<void> {
   if (!config.telegram.botToken) return;
@@ -76,6 +79,47 @@ export async function pollA2pOnce(): Promise<void> {
   }
 }
 
+/**
+ * Poll the RingCentral call log for recent INBOUND calls and record any that
+ * were placed to one of our configured line numbers (answered OR missed).
+ */
+export async function pollCallsOnce(): Promise<void> {
+  try {
+    // Only process calls to numbers we actually manage as lines.
+    const lines = await prisma.line.findMany({ where: { isActive: true }, select: { phoneE164: true } });
+    const lineNumbers = new Set(lines.map((l) => l.phoneE164));
+    if (lineNumbers.size === 0) return;
+
+    const token = await getAccessToken();
+    const dateFrom = new Date(Date.now() - 10 * 60_000).toISOString();
+    const r = await fetch(
+      `${config.ringcentral.serverUrl}/restapi/v1.0/account/~/call-log?direction=Inbound&view=Detailed&dateFrom=${encodeURIComponent(dateFrom)}&perPage=100`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
+    const j = (await r.json()) as any;
+    for (const c of j.records || []) {
+      const to = c.to?.phoneNumber;
+      const from = c.from?.phoneNumber;
+      if (!to || !from || !lineNumbers.has(to)) continue;
+      if (seenCalls.has(c.id)) continue;
+      seenCalls.add(c.id);
+      const res = await processInboundCall({
+        from,
+        to,
+        ringcentralCallId: c.id,
+        result: c.result,
+        durationSec: typeof c.duration === 'number' ? c.duration : undefined,
+        startedAt: c.startTime,
+      });
+      if (res.status === 'processed') {
+        logger.info('poll_inbound_call', { from, to, result: res.result, sellerId: res.sellerId });
+      }
+    }
+  } catch {
+    /* transient — ignore */
+  }
+}
+
 /** Start the polling loops. Clears any Telegram webhook and skips the backlog first. */
 export async function startPolling(): Promise<void> {
   if (config.telegram.botToken) {
@@ -89,7 +133,8 @@ export async function startPolling(): Promise<void> {
       /* ignore */
     }
   }
-  logger.info('polling_started', { telegram: Boolean(config.telegram.botToken), a2p: config.ringcentral.useA2p });
+  logger.info('polling_started', { telegram: Boolean(config.telegram.botToken), a2p: config.ringcentral.useA2p, calls: true });
   setInterval(pollTelegramOnce, 3000);
   setInterval(pollA2pOnce, 8000);
+  setInterval(pollCallsOnce, 15000);
 }

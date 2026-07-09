@@ -1,15 +1,17 @@
-// Prisma schema for the private SMS router.
+// Prisma schema for the private SMS/Call router.
 //
 // SWITCHING TO POSTGRESQL:
 //   1. Change `provider` below from "sqlite" to "postgresql".
-//   2. Set DATABASE_URL to your Postgres URL, e.g.
-//        DATABASE_URL="postgresql://user:pass@host:5432/sms_router?schema=public"
-//   3. Run `npx prisma migrate dev --name init` (or `npx prisma db push`).
+//   2. Set DATABASE_URL to your Postgres URL.
+//   3. Run `npx prisma db push` (or `npx prisma migrate dev --name init`).
 //
-// The schema deliberately avoids Prisma enums and DB-native arrays so the exact
-// same models work on both SQLite (local/testing) and PostgreSQL (production).
-// Status / direction / mode fields are plain strings validated in the app layer
-// (see src/types.ts).
+// No Prisma enums / native arrays, so the same models work on SQLite + Postgres.
+//
+// SEGMENTATION: a "Line" is one company phone number + its own team of sellers +
+// its own round-robin cursor. Inbound SMS/calls to a line's number are
+// distributed only among that line's sellers. A Contact is scoped to a line
+// (same phone on two different company numbers = two separate contacts), so
+// "one client -> one seller" holds within a line.
 
 generator client {
   provider = "prisma-client-js"
@@ -20,9 +22,30 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+model Line {
+  id         String   @id @default(cuid())
+  // The company phone number clients text/call (E.164). Unique per line.
+  phoneE164  String   @unique @map("phone_e164")
+  name       String
+  isActive   Boolean  @default(true) @map("is_active")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  sellers        Seller[]
+  contacts       Contact[]
+  conversations  Conversation[]
+  messages       Message[]
+  calls          Call[]
+  routingStates  RoutingState[]
+
+  @@map("lines")
+}
+
 model Seller {
   id                     String    @id @default(cuid())
   name                   String
+  // Which line/team this seller belongs to (null = unassigned).
+  lineId                 String?   @map("line_id")
   telegramUserId         String?   @unique @map("telegram_user_id")
   ringcentralExtensionId String?   @map("ringcentral_extension_id")
   isActive               Boolean   @default(true) @map("is_active")
@@ -31,17 +54,20 @@ model Seller {
   createdAt              DateTime  @default(now()) @map("created_at")
   updatedAt              DateTime  @updatedAt @map("updated_at")
 
+  line          Line?          @relation(fields: [lineId], references: [id])
   contacts      Contact[]
   conversations Conversation[]
   messages      Message[]
+  calls         Call[]
 
-  @@index([isActive, priority, id])
+  @@index([lineId, isActive, priority, id])
   @@map("sellers")
 }
 
 model Contact {
   id               String    @id @default(cuid())
-  phoneE164        String    @unique @map("phone_e164")
+  phoneE164        String    @map("phone_e164")
+  lineId           String    @map("line_id")
   assignedSellerId String?   @map("assigned_seller_id")
   // status: active | closed | blocked | opt_out
   status           String    @default("active")
@@ -50,10 +76,14 @@ model Contact {
   createdAt        DateTime  @default(now()) @map("created_at")
   updatedAt        DateTime  @updatedAt @map("updated_at")
 
+  line           Line           @relation(fields: [lineId], references: [id])
   assignedSeller Seller?        @relation(fields: [assignedSellerId], references: [id])
   conversations  Conversation[]
   messages       Message[]
+  calls          Call[]
 
+  // Same phone can exist once per line.
+  @@unique([phoneE164, lineId])
   @@index([assignedSellerId])
   @@map("contacts")
 }
@@ -61,6 +91,7 @@ model Contact {
 model Conversation {
   id               String    @id @default(cuid())
   contactId        String    @map("contact_id")
+  lineId           String    @map("line_id")
   assignedSellerId String?   @map("assigned_seller_id")
   // status: open | closed | blocked
   status           String    @default("open")
@@ -69,6 +100,7 @@ model Conversation {
   updatedAt        DateTime  @updatedAt @map("updated_at")
 
   contact  Contact   @relation(fields: [contactId], references: [id])
+  line     Line      @relation(fields: [lineId], references: [id])
   seller   Seller?   @relation(fields: [assignedSellerId], references: [id])
   messages Message[]
 
@@ -81,6 +113,7 @@ model Message {
   id                   String   @id @default(cuid())
   conversationId       String   @map("conversation_id")
   contactId            String   @map("contact_id")
+  lineId               String?  @map("line_id")
   sellerId             String?  @map("seller_id")
   // direction: inbound | outbound
   direction            String
@@ -97,6 +130,7 @@ model Message {
 
   conversation Conversation @relation(fields: [conversationId], references: [id])
   contact      Contact      @relation(fields: [contactId], references: [id])
+  line         Line?        @relation(fields: [lineId], references: [id])
   seller       Seller?      @relation(fields: [sellerId], references: [id])
 
   @@index([conversationId])
@@ -105,12 +139,43 @@ model Message {
   @@map("messages")
 }
 
+model Call {
+  id                String    @id @default(cuid())
+  lineId            String    @map("line_id")
+  contactId         String    @map("contact_id")
+  sellerId          String?   @map("seller_id")
+  // direction: inbound | outbound
+  direction         String    @default("inbound")
+  // result: answered | missed | voicemail | rejected | busy | unknown
+  result            String    @default("unknown")
+  durationSec       Int?      @map("duration_sec")
+  ringcentralCallId String?   @unique @map("ringcentral_call_id")
+  telegramMessageId String?   @map("telegram_message_id")
+  telegramChatId    String?   @map("telegram_chat_id")
+  startedAt         DateTime? @map("started_at")
+  rawPayloadJson    String?   @map("raw_payload_json")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+
+  line    Line     @relation(fields: [lineId], references: [id])
+  contact Contact  @relation(fields: [contactId], references: [id])
+  seller  Seller?  @relation(fields: [sellerId], references: [id])
+
+  @@index([sellerId])
+  @@index([contactId])
+  @@index([lineId, startedAt])
+  @@map("calls")
+}
+
 model RoutingState {
   id           String   @id @default(cuid())
-  // mode: round_robin (only mode supported today)
+  // One cursor per line (null = legacy/global).
+  lineId       String?  @unique @map("line_id")
   mode         String   @default("round_robin")
   lastSellerId String?  @map("last_seller_id")
   updatedAt    DateTime @updatedAt @map("updated_at")
+
+  line Line? @relation(fields: [lineId], references: [id])
 
   @@map("routing_state")
 }

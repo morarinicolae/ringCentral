@@ -118,3 +118,18 @@ export function formatOptOutNotification(clientPhone: string, body: string): str
     'This client has opted out. You cannot send SMS to them.',
   ].join('\n');
 }
+
+/** Format the inbound-call notification a seller receives. */
+export function formatCallNotification(clientPhone: string, result: string, durationSec?: number): string {
+  const icon = result === 'missed' ? '📵' : result === 'voicemail' ? '📩' : '📞';
+  const label =
+    result === 'missed'
+      ? 'Missed call'
+      : result === 'answered'
+        ? 'Answered call'
+        : result === 'voicemail'
+          ? 'Voicemail'
+          : 'Call';
+  const dur = durationSec != null ? ` (${durationSec}s)` : '';
+  return [`${icon} ${label}${dur}`, '', `Client: ${clientPhone}`, '', 'This caller is assigned to you.'].join('\n');
+}

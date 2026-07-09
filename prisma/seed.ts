@@ -4,44 +4,71 @@ import { PrismaClient } from '@prisma/client';
 const prisma = new PrismaClient();
 
 /**
- * Seed 3 test sellers + the routing_state singleton.
+ * Seed LINES (a company number + its own team) and one seller per line.
  *
- * Set each seller's telegram_user_id to a REAL Telegram user id (the numeric id
- * of the person who will receive that seller's notifications) so private
- * notifications actually arrive. For local testing without a bot, the values
- * below are placeholders; the in-memory Telegram mock still records outbox
- * messages so the flow is fully testable.
+ * Matches the "each seller has their own number, fully separate" setup:
+ *   Line 1 (number 1) -> Seller One   ·   Line 2 (number 2) -> Seller Two
  *
- * Override via env, e.g.:
- *   SELLER1_TELEGRAM_ID=123 SELLER2_TELEGRAM_ID=456 SELLER3_TELEGRAM_ID=789 npm run seed
+ * Configure via env (numbers must be E.164):
+ *   LINE1_NUMBER, LINE1_NAME, SELLER1_NAME, SELLER1_TELEGRAM_ID
+ *   LINE2_NUMBER, LINE2_NAME, SELLER2_NAME, SELLER2_TELEGRAM_ID   (optional)
+ *
+ * Line 1 defaults to RINGCENTRAL_FROM_NUMBER. Line 2 is only created if
+ * LINE2_NUMBER is provided.
  */
-const SELLERS = [
-  { name: 'Seller One', telegramUserId: process.env.SELLER1_TELEGRAM_ID ?? '1000001', priority: 10 },
-  { name: 'Seller Two', telegramUserId: process.env.SELLER2_TELEGRAM_ID ?? '1000002', priority: 20 },
-  { name: 'Seller Three', telegramUserId: process.env.SELLER3_TELEGRAM_ID ?? '1000003', priority: 30 },
-];
+interface LineSeed {
+  number: string;
+  lineName: string;
+  sellerName: string;
+  sellerTelegram: string;
+}
+
+function buildLines(): LineSeed[] {
+  const lines: LineSeed[] = [];
+  const l1 = process.env.LINE1_NUMBER ?? process.env.RINGCENTRAL_FROM_NUMBER ?? '+10000000001';
+  lines.push({
+    number: l1,
+    lineName: process.env.LINE1_NAME ?? 'Line 1',
+    sellerName: process.env.SELLER1_NAME ?? 'Seller One',
+    sellerTelegram: process.env.SELLER1_TELEGRAM_ID ?? '1000001',
+  });
+  if (process.env.LINE2_NUMBER) {
+    lines.push({
+      number: process.env.LINE2_NUMBER,
+      lineName: process.env.LINE2_NAME ?? 'Line 2',
+      sellerName: process.env.SELLER2_NAME ?? 'Seller Two',
+      sellerTelegram: process.env.SELLER2_TELEGRAM_ID ?? '1000002',
+    });
+  }
+  return lines;
+}
 
 async function main() {
-  for (const s of SELLERS) {
-    await prisma.seller.upsert({
-      where: { telegramUserId: s.telegramUserId },
-      update: { name: s.name, priority: s.priority, isActive: true },
-      create: { name: s.name, telegramUserId: s.telegramUserId, priority: s.priority, isActive: true },
+  const lines = buildLines();
+  let priority = 10;
+
+  for (const l of lines) {
+    const line = await prisma.line.upsert({
+      where: { phoneE164: l.number },
+      update: { name: l.lineName, isActive: true },
+      create: { phoneE164: l.number, name: l.lineName, isActive: true },
     });
+    await prisma.seller.upsert({
+      where: { telegramUserId: l.sellerTelegram },
+      update: { name: l.sellerName, priority, isActive: true, lineId: line.id },
+      create: { name: l.sellerName, telegramUserId: l.sellerTelegram, priority, isActive: true, lineId: line.id },
+    });
+    // Ensure the line has a routing cursor.
+    const rs = await prisma.routingState.findUnique({ where: { lineId: line.id } });
+    if (!rs) await prisma.routingState.create({ data: { lineId: line.id, mode: 'round_robin' } });
+
     // eslint-disable-next-line no-console
-    console.log(`Seeded seller: ${s.name} (telegram ${s.telegramUserId}, priority ${s.priority})`);
+    console.log(`Seeded line "${l.lineName}" (${l.number}) -> ${l.sellerName} (telegram ${l.sellerTelegram})`);
+    priority += 10;
   }
 
-  const existingState = await prisma.routingState.findFirst();
-  if (!existingState) {
-    await prisma.routingState.create({ data: { mode: 'round_robin' } });
-    // eslint-disable-next-line no-console
-    console.log('Seeded routing_state (round_robin).');
-  }
-
-  const total = await prisma.seller.count();
   // eslint-disable-next-line no-console
-  console.log(`Done. ${total} sellers in DB.`);
+  console.log(`Done. ${await prisma.line.count()} lines, ${await prisma.seller.count()} sellers.`);
 }
 
 main()

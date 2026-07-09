@@ -26,7 +26,7 @@ describe('opt-out protection', () => {
   it('Test 8: STOP from a client marks the contact opt_out', async () => {
     const c = await inbound('+15550000003', 'STOP');
     expect(c.result.optOut).toBe(true);
-    const contact = await prisma.contact.findUnique({ where: { phoneE164: '+15550000003' } });
+    const contact = await prisma.contact.findFirst({ where: { phoneE164: '+15550000003' } });
     expect(contact?.status).toBe('opt_out');
     // Opt-out is audited.
     expect(await prisma.auditLog.count({ where: { action: 'opt_out_detected' } })).toBe(1);
