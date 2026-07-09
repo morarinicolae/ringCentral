@@ -5,6 +5,7 @@ import { webhooksRouter } from './routes/webhooks';
 import { testRouter } from './routes/test';
 import { adminRouter } from './routes/admin';
 import { sellerRouter } from './routes/seller';
+import { panelRouter } from './routes/panel';
 
 export function createServer(): Express {
   const app = express();
@@ -23,6 +24,10 @@ export function createServer(): Express {
   app.use('/webhooks', webhooksRouter);
   app.use('/admin', adminRouter);
   app.use('/seller', sellerRouter);
+
+  // Admin web UI (the page shell is public; every data call it makes carries
+  // the admin token the user enters, and hits the token-protected /admin/* API).
+  app.use('/panel', panelRouter);
 
   // The test/simulate endpoints are only mounted when TEST_MODE is on, so a
   // production instance never exposes the SMS simulator.
