@@ -4,71 +4,74 @@ import { PrismaClient } from '@prisma/client';
 const prisma = new PrismaClient();
 
 /**
- * Seed LINES (a company number + its own team) and one seller per line.
+ * Seed lines + sellers. Supports both setups:
  *
- * Matches the "each seller has their own number, fully separate" setup:
- *   Line 1 (number 1) -> Seller One   ·   Line 2 (number 2) -> Seller Two
+ *  SHARED (one number, round-robin between sellers) — the default:
+ *    set SELLER1_TELEGRAM_ID + SELLER2_TELEGRAM_ID (+ SELLER3_...) and ONE
+ *    LINE1_NUMBER. All sellers land on Line 1 -> new clients alternate
+ *    1->Seller1, 2->Seller2, 3->Seller1... and stay with their seller.
  *
- * Configure via env (numbers must be E.164):
- *   LINE1_NUMBER, LINE1_NAME, SELLER1_NAME, SELLER1_TELEGRAM_ID
- *   LINE2_NUMBER, LINE2_NAME, SELLER2_NAME, SELLER2_TELEGRAM_ID   (optional)
+ *  SEGMENTED (each seller their own number):
+ *    also set LINE2_NUMBER (+ LINE3_NUMBER). Then Seller 2 goes on Line 2, etc.
  *
- * Line 1 defaults to RINGCENTRAL_FROM_NUMBER. Line 2 is only created if
- * LINE2_NUMBER is provided.
+ * Env: LINEn_NUMBER, LINEn_NAME, SELLERn_NAME, SELLERn_TELEGRAM_ID (n = 1..3).
+ * Line 1 defaults to RINGCENTRAL_FROM_NUMBER.
  */
-interface LineSeed {
-  number: string;
-  lineName: string;
+const FROM = process.env.RINGCENTRAL_FROM_NUMBER ?? '+10000000001';
+const LINE1_NUMBER = process.env.LINE1_NUMBER ?? FROM;
+const LINE1_NAME = process.env.LINE1_NAME ?? 'Sales';
+
+interface Row {
   sellerName: string;
   sellerTelegram: string;
+  lineNumber: string;
+  lineName: string;
 }
 
-function buildLines(): LineSeed[] {
-  const lines: LineSeed[] = [];
-  const l1 = process.env.LINE1_NUMBER ?? process.env.RINGCENTRAL_FROM_NUMBER ?? '+10000000001';
-  lines.push({
-    number: l1,
-    lineName: process.env.LINE1_NAME ?? 'Line 1',
-    sellerName: process.env.SELLER1_NAME ?? 'Seller One',
-    sellerTelegram: process.env.SELLER1_TELEGRAM_ID ?? '1000001',
-  });
-  if (process.env.LINE2_NUMBER) {
-    lines.push({
-      number: process.env.LINE2_NUMBER,
-      lineName: process.env.LINE2_NAME ?? 'Line 2',
-      sellerName: process.env.SELLER2_NAME ?? 'Seller Two',
-      sellerTelegram: process.env.SELLER2_TELEGRAM_ID ?? '1000002',
+function buildRows(): Row[] {
+  const rows: Row[] = [];
+  for (let n = 1; n <= 3; n++) {
+    const tg = process.env[`SELLER${n}_TELEGRAM_ID`] ?? (n === 1 ? '1000001' : undefined);
+    if (!tg) continue;
+    // Seller n gets its own line only if LINEn_NUMBER is set; otherwise it
+    // shares Line 1 (round-robin).
+    const lineNumber = process.env[`LINE${n}_NUMBER`] ?? LINE1_NUMBER;
+    const lineName = process.env[`LINE${n}_NAME`] ?? (lineNumber === LINE1_NUMBER ? LINE1_NAME : `Line ${n}`);
+    rows.push({
+      sellerName: process.env[`SELLER${n}_NAME`] ?? `Seller ${n}`,
+      sellerTelegram: tg,
+      lineNumber,
+      lineName,
     });
   }
-  return lines;
+  return rows;
 }
 
 async function main() {
-  const lines = buildLines();
+  const rows = buildRows();
   let priority = 10;
 
-  for (const l of lines) {
+  for (const r of rows) {
     const line = await prisma.line.upsert({
-      where: { phoneE164: l.number },
-      update: { name: l.lineName, isActive: true },
-      create: { phoneE164: l.number, name: l.lineName, isActive: true },
+      where: { phoneE164: r.lineNumber },
+      update: { name: r.lineName, isActive: true },
+      create: { phoneE164: r.lineNumber, name: r.lineName, isActive: true },
     });
-    await prisma.seller.upsert({
-      where: { telegramUserId: l.sellerTelegram },
-      update: { name: l.sellerName, priority, isActive: true, lineId: line.id },
-      create: { name: l.sellerName, telegramUserId: l.sellerTelegram, priority, isActive: true, lineId: line.id },
-    });
-    // Ensure the line has a routing cursor.
     const rs = await prisma.routingState.findUnique({ where: { lineId: line.id } });
     if (!rs) await prisma.routingState.create({ data: { lineId: line.id, mode: 'round_robin' } });
 
+    await prisma.seller.upsert({
+      where: { telegramUserId: r.sellerTelegram },
+      update: { name: r.sellerName, priority, isActive: true, lineId: line.id },
+      create: { name: r.sellerName, telegramUserId: r.sellerTelegram, priority, isActive: true, lineId: line.id },
+    });
     // eslint-disable-next-line no-console
-    console.log(`Seeded line "${l.lineName}" (${l.number}) -> ${l.sellerName} (telegram ${l.sellerTelegram})`);
+    console.log(`Seeded ${r.sellerName} (telegram ${r.sellerTelegram}) on line "${r.lineName}" (${r.lineNumber})`);
     priority += 10;
   }
 
   // eslint-disable-next-line no-console
-  console.log(`Done. ${await prisma.line.count()} lines, ${await prisma.seller.count()} sellers.`);
+  console.log(`Done. ${await prisma.line.count()} line(s), ${await prisma.seller.count()} seller(s).`);
 }
 
 main()
