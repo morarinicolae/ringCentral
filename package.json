@@ -22,7 +22,8 @@
     "typecheck": "tsc --noEmit",
     "rc:send": "tsx scripts/ringcentral-send.ts",
     "rc:poll-inbound": "tsx scripts/ringcentral-poll-inbound.ts",
-    "rc:poll-a2p": "tsx scripts/ringcentral-poll-a2p.ts"
+    "rc:poll-a2p": "tsx scripts/ringcentral-poll-a2p.ts",
+    "dev:poll": "tsx watch scripts/dev-poll.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
