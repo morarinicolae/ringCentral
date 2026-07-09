@@ -22,6 +22,9 @@ export const config = {
   port: int(process.env.PORT, 3000),
   databaseUrl: process.env.DATABASE_URL ?? 'file:./dev.db',
   appBaseUrl: process.env.APP_BASE_URL ?? '',
+  // When true the server also runs the in-process polling bridge (Telegram +
+  // A2P inbound). Lets a single process work without a public webhook URL.
+  pollMode: ['1', 'true', 'yes', 'on'].includes((process.env.POLL_MODE ?? '').trim().toLowerCase()),
 
   // TEST_MODE: never send real SMS unless ALLOW_REAL_SMS is also true.
   testMode: bool(process.env.TEST_MODE, true),
