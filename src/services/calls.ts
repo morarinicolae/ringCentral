@@ -55,7 +55,11 @@ export async function getOrAssignSellerForCall(
 } | null> {
   const from = normalizeE164(fromRaw);
   if (!isValidE164(from)) return null;
-  const line = await resolveLineByNumber(to);
+  // STRICT match only — the account-wide telephony webhook sees EVERY call in
+  // the company, and most numbers belong to other departments. A call to a
+  // number that is not an explicitly configured line must be left untouched
+  // (no fallback, no contact creation, no forward).
+  const line = await prisma.line.findFirst({ where: { isActive: true, phoneE164: normalizeE164(to) } });
   if (!line) return null;
 
   const { sellerId, isNew } = await prisma.$transaction(async (t) => {

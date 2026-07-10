@@ -45,16 +45,22 @@ telephonyRouter.post('/', async (req, res) => {
     );
     if (!party) return;
 
+    const from: string | undefined = party.from?.phoneNumber;
+    const to: string | undefined = party.to?.phoneNumber;
+    if (!from || !to) return;
+
+    // The account-wide subscription delivers EVERY inbound call in the company.
+    // Only touch calls to numbers explicitly configured as lines — everything
+    // else belongs to other departments and must be ignored silently.
+    const line = await prisma.line.findFirst({ where: { isActive: true, phoneE164: to }, select: { id: true } });
+    if (!line) return;
+
     if (handledSessions.has(sessionId)) return;
     handledSessions.set(sessionId, Date.now());
     if (handledSessions.size > 500) {
       const cutoff = Date.now() - 3_600_000;
       for (const [k, ts] of handledSessions) if (ts < cutoff) handledSessions.delete(k);
     }
-
-    const from: string | undefined = party.from?.phoneNumber;
-    const to: string | undefined = party.to?.phoneNumber;
-    if (!from || !to) return;
 
     // Sticky owner (existing caller -> same seller; new -> round-robin + stuck).
     const owner = await getOrAssignSellerForCall(from, to);
