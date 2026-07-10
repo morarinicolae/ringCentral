@@ -39,6 +39,39 @@ export async function forwardCall(
   }
 }
 
+/**
+ * RingOut: call the SELLER's phone first, then bridge in the client. The client
+ * sees `callerId` (the company number), never the seller's personal mobile.
+ */
+export async function ringOut(
+  rc: RcConfig,
+  args: { from: string; to: string; callerId: string },
+): Promise<{ ok: boolean; status?: number; raw?: unknown }> {
+  try {
+    const token = await getAccessTokenFor(rc);
+    const res = await fetch(`${rc.serverUrl}/restapi/v1.0/account/~/extension/~/ring-out`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        from: { phoneNumber: args.from },
+        to: { phoneNumber: args.to },
+        callerId: { phoneNumber: args.callerId },
+        playPrompt: false,
+      }),
+    });
+    const raw = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      logger.error('ringout_failed', { ...args, status: res.status, raw });
+      return { ok: false, status: res.status, raw };
+    }
+    logger.info('ringout_started', args);
+    return { ok: true, raw };
+  } catch (err) {
+    logger.error('ringout_error', { error: err instanceof Error ? err.message : String(err) });
+    return { ok: false };
+  }
+}
+
 /** Create a webhook subscription for inbound telephony sessions on an account. */
 export async function createTelephonySubscription(
   webhookUrl: string,

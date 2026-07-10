@@ -9,7 +9,8 @@ import {
   MSG_UNKNOWN_CONTEXT,
 } from '../constants';
 import { ParsedTelegramMessage, sendTelegramMessage } from './telegram';
-import { sendSms } from './ringcentral';
+import { sendSms, rcConfigForLine } from './ringcentral';
+import { ringOut } from './call-control';
 import { writeAudit } from './audit';
 
 export interface ReplyResult {
@@ -55,6 +56,13 @@ export async function processSellerReply(msg: ParsedTelegramMessage): Promise<Re
   const isAdmin = config.adminTelegramIds.includes(msg.fromId);
   const thread = msg.messageThreadId;
 
+  // /call — reply to a client notification with /call to CALL the client back:
+  // RingOut rings the seller's mobile first, then bridges the client, who sees
+  // the company (line) number — never the seller's personal mobile.
+  if (/^\/call\b/i.test(msg.text.trim())) {
+    return handleCallCommand(msg, seller, thread);
+  }
+
   // Lightweight helper commands. Echoes the ids needed to wire up a group:
   // the CHAT id (set as the seller's Telegram target) and the TOPIC id.
   if (msg.text.trim().startsWith('/')) {
@@ -63,6 +71,7 @@ export async function processSellerReply(msg: ParsedTelegramMessage): Promise<Re
       thread ? `Topic ID: ${thread}` : `Your user ID: ${msg.fromId}`,
       seller ? `This chat is the target for seller "${seller.name}".` : 'This chat is not yet linked to a seller.',
       'To answer a client, reply directly to one of the client message notifications I send here.',
+      'To CALL a client back, reply to their notification with /call.',
     ].join('\n');
     await replyToSeller(msg.chatId, help, msg.messageId, thread);
     return { handled: true, outcome: 'command', replyText: help };
@@ -207,4 +216,75 @@ export async function processSellerReply(msg: ParsedTelegramMessage): Promise<Re
 
   logger.info('seller_reply_processed', { conversationId: conversation.id, outboundMessageId: outbound.id, outcome, actingSellerId });
   return { handled: true, outcome, replyText: confirmation, conversationId: conversation.id, outboundMessageId: outbound.id };
+}
+
+/**
+ * `/call` as a reply to a client notification (SMS or call): call the client
+ * back via RingOut. Rings the seller's own mobile first, then bridges the
+ * client; the client sees the LINE's number as caller id.
+ */
+async function handleCallCommand(
+  msg: ParsedTelegramMessage,
+  seller: Awaited<ReturnType<typeof prisma.seller.findUnique>>,
+  thread?: string,
+): Promise<ReplyResult> {
+  const say = async (text: string, outcome: ReplyResult['outcome']): Promise<ReplyResult> => {
+    await replyToSeller(msg.chatId, text, msg.messageId, thread);
+    return { handled: true, outcome, replyText: text };
+  };
+
+  if (!seller) return say(MSG_NOT_REGISTERED, 'not_registered');
+  if (!msg.replyToMessageId) {
+    return say('Ca să sun un client: dă reply cu /call chiar pe notificarea lui (mesaj sau apel).', 'no_context');
+  }
+
+  // The replied-to notification can be an SMS notification (messages) or a call
+  // notification (calls) — both store the Telegram chat+message id.
+  const notifMsg = await prisma.message.findFirst({
+    where: { telegramChatId: msg.chatId, telegramMessageId: msg.replyToMessageId },
+    orderBy: { createdAt: 'desc' },
+  });
+  const notifCall = notifMsg
+    ? null
+    : await prisma.call.findFirst({
+        where: { telegramChatId: msg.chatId, telegramMessageId: msg.replyToMessageId },
+        orderBy: { createdAt: 'desc' },
+      });
+  const contactId = notifMsg?.contactId ?? notifCall?.contactId;
+  if (!contactId) return say(MSG_UNKNOWN_CONTEXT, 'unknown_context');
+
+  const contact = await prisma.contact.findUnique({ where: { id: contactId } });
+  if (!contact) return say(MSG_UNKNOWN_CONTEXT, 'unknown_context');
+
+  // Ownership: only the assigned seller may call this client (privacy).
+  if (contact.assignedSellerId !== seller.id) {
+    logger.warn(Decision.UNAUTHORIZED_REPLY, { via: 'call_command', fromId: msg.fromId, sellerId: seller.id, contactId });
+    return say(MSG_NOT_YOUR_CONVERSATION, 'blocked_ownership');
+  }
+  if (contact.status === 'opt_out' || contact.status === 'blocked') {
+    return say(`Clientul are status ${contact.status} — nu îl putem contacta.`, 'blocked_opt_out');
+  }
+  if (!seller.phoneE164) {
+    return say('Nu ai un număr de mobil setat în panou (coloana „Mobil"), așa că nu te pot suna ca să te conectez.', 'failed');
+  }
+
+  const line = await prisma.line.findUnique({ where: { id: contact.lineId } });
+  const callerId = line?.phoneE164 ?? config.ringcentral.fromNumber;
+
+  if (config.testMode && !config.allowRealSms) {
+    logger.info('callback_test_mode', { sellerId: seller.id, to: contact.phoneE164, callerId });
+    return say(`TEST MODE: te-aș suna pe ${seller.phoneE164} și aș conecta clientul ${contact.phoneE164} (el ar vedea ${callerId}).`, 'test_sent');
+  }
+
+  const res = await ringOut(rcConfigForLine(line), { from: seller.phoneE164, to: contact.phoneE164, callerId });
+  await writeAudit({
+    actorType: 'seller',
+    actorId: seller.id,
+    action: res.ok ? 'callback_started' : 'callback_failed',
+    entityType: 'contact',
+    entityId: contact.id,
+    details: { to: contact.phoneE164, callerId },
+  });
+  if (!res.ok) return say('❌ Nu am reușit să pornesc apelul. Încearcă din nou sau sună manual.', 'failed');
+  return say(`📞 Te sun acum pe ${seller.phoneE164} — răspunde și te conectez cu ${contact.phoneE164} (clientul vede ${callerId}).`, 'sent');
 }
