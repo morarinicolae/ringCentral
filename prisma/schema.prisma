@@ -110,6 +110,9 @@ model Contact {
   phoneE164        String    @map("phone_e164")
   lineId           String    @map("line_id")
   assignedSellerId String?   @map("assigned_seller_id")
+  // The client's own forum TOPIC (message_thread_id) inside the owner seller's
+  // Telegram group — every SMS/call notification for this client lands there.
+  telegramTopicId  String?   @map("telegram_topic_id")
   // status: active | closed | blocked | opt_out
   status           String    @default("active")
   firstMessageAt   DateTime? @map("first_message_at")

@@ -35,6 +35,10 @@ async function replyToSeller(chatId: string, text: string, replyToMessageId?: st
   await sendTelegramMessage(chatId, text, { replyToMessageId, messageThreadId });
 }
 
+function loadConversation(id: string) {
+  return prisma.conversation.findUnique({ where: { id }, include: { contact: true, line: true } });
+}
+
 /**
  * Handle one parsed Telegram message from a seller and, if it's a valid reply
  * to a client notification, turn it into an outbound SMS.
@@ -88,31 +92,40 @@ export async function processSellerReply(msg: ParsedTelegramMessage): Promise<Re
     return { handled: true, outcome: 'not_registered', replyText: MSG_NOT_REGISTERED };
   }
 
-  // Rule 3: no blind replies. A reply must reference a specific notification.
-  if (!msg.replyToMessageId) {
-    await replyToSeller(msg.chatId, MSG_NO_CONTEXT, msg.messageId, thread);
-    logger.info('reply_without_context_blocked', { fromId: msg.fromId });
-    return { handled: true, outcome: 'no_context', replyText: MSG_NO_CONTEXT };
+  // Resolve the target conversation two ways (rule 3 — never guess):
+  //  (a) a Telegram reply to a specific client notification, or
+  //  (b) a message inside the CLIENT'S OWN TOPIC — the topic IS the context,
+  //      so the team can just type in the client's thread.
+  let conversation: Awaited<ReturnType<typeof loadConversation>> = null;
+  if (msg.replyToMessageId) {
+    const notification = await prisma.message.findFirst({
+      where: { telegramChatId: msg.chatId, telegramMessageId: msg.replyToMessageId },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (notification) conversation = await loadConversation(notification.conversationId);
   }
-
-  // Resolve the replied-to notification back to a conversation.
-  const notification = await prisma.message.findFirst({
-    where: { telegramChatId: msg.chatId, telegramMessageId: msg.replyToMessageId },
-    orderBy: { createdAt: 'desc' },
-  });
-  if (!notification) {
-    await replyToSeller(msg.chatId, MSG_UNKNOWN_CONTEXT, msg.messageId, thread);
-    logger.info('reply_context_not_found', { fromId: msg.fromId, replyToMessageId: msg.replyToMessageId });
-    return { handled: true, outcome: 'unknown_context', replyText: MSG_UNKNOWN_CONTEXT };
+  if (!conversation && thread && seller) {
+    const topicContact = await prisma.contact.findFirst({ where: { telegramTopicId: thread } });
+    if (topicContact && topicContact.assignedSellerId === seller.id) {
+      conversation = await prisma.conversation.findFirst({
+        where: { contactId: topicContact.id },
+        orderBy: { createdAt: 'desc' },
+        include: { contact: true, line: true },
+      });
+      if (!conversation) {
+        // Call-only client: open their conversation on first SMS from the topic.
+        conversation = await prisma.conversation.create({
+          data: { contactId: topicContact.id, lineId: topicContact.lineId, assignedSellerId: topicContact.assignedSellerId, status: 'open', lastMessageAt: new Date() },
+          include: { contact: true, line: true },
+        });
+      }
+    }
   }
-
-  const conversation = await prisma.conversation.findUnique({
-    where: { id: notification.conversationId },
-    include: { contact: true, line: true },
-  });
   if (!conversation || !conversation.contact) {
-    await replyToSeller(msg.chatId, MSG_UNKNOWN_CONTEXT, msg.messageId, thread);
-    return { handled: true, outcome: 'unknown_context', replyText: MSG_UNKNOWN_CONTEXT };
+    const text = msg.replyToMessageId ? MSG_UNKNOWN_CONTEXT : MSG_NO_CONTEXT;
+    await replyToSeller(msg.chatId, text, msg.messageId, thread);
+    logger.info('reply_context_not_found', { fromId: msg.fromId, replyToMessageId: msg.replyToMessageId, thread });
+    return { handled: true, outcome: msg.replyToMessageId ? 'unknown_context' : 'no_context', replyText: text };
   }
 
   // Rule 7: the seller must own this conversation. An admin replying in their
@@ -153,8 +166,9 @@ export async function processSellerReply(msg: ParsedTelegramMessage): Promise<Re
   }
 
   // Reply goes out FROM the line's own number, so the client sees the same
-  // number they contacted.
-  const fromNumber = conversation.line?.phoneE164 ?? config.ringcentral.fromNumber;
+  // number they contacted — unless RINGCENTRAL_SMS_FROM overrides it (the line
+  // number may belong to an IVR/queue extension, which cannot send SMS).
+  const fromNumber = config.ringcentral.smsFrom || (conversation.line?.phoneE164 ?? config.ringcentral.fromNumber);
 
   // Record the outbound intent before sending.
   const outbound = await prisma.message.create({
@@ -234,24 +248,31 @@ async function handleCallCommand(
   };
 
   if (!seller) return say(MSG_NOT_REGISTERED, 'not_registered');
-  if (!msg.replyToMessageId) {
-    return say('Ca să sun un client: dă reply cu /call chiar pe notificarea lui (mesaj sau apel).', 'no_context');
-  }
 
-  // The replied-to notification can be an SMS notification (messages) or a call
-  // notification (calls) — both store the Telegram chat+message id.
-  const notifMsg = await prisma.message.findFirst({
-    where: { telegramChatId: msg.chatId, telegramMessageId: msg.replyToMessageId },
-    orderBy: { createdAt: 'desc' },
-  });
-  const notifCall = notifMsg
-    ? null
-    : await prisma.call.findFirst({
-        where: { telegramChatId: msg.chatId, telegramMessageId: msg.replyToMessageId },
-        orderBy: { createdAt: 'desc' },
-      });
-  const contactId = notifMsg?.contactId ?? notifCall?.contactId;
-  if (!contactId) return say(MSG_UNKNOWN_CONTEXT, 'unknown_context');
+  // Resolve the client: a reply to their notification (SMS or call), or simply
+  // /call typed inside the client's own topic.
+  let contactId: string | undefined;
+  if (msg.replyToMessageId) {
+    const notifMsg = await prisma.message.findFirst({
+      where: { telegramChatId: msg.chatId, telegramMessageId: msg.replyToMessageId },
+      orderBy: { createdAt: 'desc' },
+    });
+    const notifCall = notifMsg
+      ? null
+      : await prisma.call.findFirst({
+          where: { telegramChatId: msg.chatId, telegramMessageId: msg.replyToMessageId },
+          orderBy: { createdAt: 'desc' },
+        });
+    contactId = notifMsg?.contactId ?? notifCall?.contactId;
+  }
+  if (!contactId && thread) {
+    const topicContact = await prisma.contact.findFirst({ where: { telegramTopicId: thread } });
+    if (topicContact && topicContact.assignedSellerId === seller.id) contactId = topicContact.id;
+  }
+  if (!contactId) {
+    if (msg.replyToMessageId) return say(MSG_UNKNOWN_CONTEXT, 'unknown_context');
+    return say('Ca să sun un client: scrie /call în topicul lui sau dă reply cu /call pe notificarea lui.', 'no_context');
+  }
 
   const contact = await prisma.contact.findUnique({ where: { id: contactId } });
   if (!contact) return say(MSG_UNKNOWN_CONTEXT, 'unknown_context');

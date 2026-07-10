@@ -63,6 +63,10 @@ export const config = {
     // number. Used to write per-client custom answering rules (native sticky)
     // and to ignore the queue's own leg when detecting who answered.
     queueExtensionId: (process.env.RINGCENTRAL_QUEUE_EXT_ID ?? '').trim(),
+    // Send SMS FROM this number instead of the line number. Needed when the
+    // line number belongs to an IVR/queue extension (classic send rejects it
+    // with MSG-304): replies then go out from a JWT-user-owned DID.
+    smsFrom: (process.env.RINGCENTRAL_SMS_FROM ?? '').trim(),
   },
 
   telegram: {

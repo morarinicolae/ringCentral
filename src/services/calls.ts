@@ -6,6 +6,7 @@ import { assignNextSeller, getSellerLineTopic } from './routing';
 import { resolveLineByNumber } from './lines';
 import { writeAudit } from './audit';
 import { sendTelegramMessage, formatCallNotification } from './telegram';
+import { ensureClientTopic } from './client-topics';
 
 export interface InboundCall {
   from: string;
@@ -200,7 +201,8 @@ export async function processInboundCall(call: InboundCall, opts: ProcessCallOpt
     const seller = await prisma.seller.findUnique({ where: { id: tx.sellerId } });
     if (seller?.telegramUserId) {
       const text = formatCallNotification(from, result, call.durationSec, { name: line.name, phone: line.phoneE164 });
-      const topicId = await getSellerLineTopic(tx.sellerId, line.id);
+      const topicId =
+        (await ensureClientTopic(tx.contact.id, from, seller)) ?? (await getSellerLineTopic(tx.sellerId, line.id));
       const sent = await sendTelegramMessage(seller.telegramUserId, text, { messageThreadId: topicId ?? undefined });
       if (sent.ok && sent.messageId) {
         notified = true;

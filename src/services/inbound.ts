@@ -7,6 +7,7 @@ import { assignNextSeller, getSellerLineTopic } from './routing';
 import { resolveLineByNumber } from './lines';
 import { writeAudit } from './audit';
 import { sendTelegramMessage, formatInboundNotification, formatOptOutNotification } from './telegram';
+import { ensureClientTopic } from './client-topics';
 
 export interface InboundResult {
   status: 'processed' | 'duplicate' | 'rejected';
@@ -153,7 +154,10 @@ export async function processInboundSms(inbound: InboundSms): Promise<InboundRes
   } else {
     const lineInfo = { name: line.name, phone: line.phoneE164 };
     const text = optedOut ? formatOptOutNotification(from, body, lineInfo) : formatInboundNotification(from, body, lineInfo);
-    const topicId = await getSellerLineTopic(tx.sellerId, line.id);
+    // Per-client topic first (thread per client in the seller's group), then
+    // the per-line topic, then the plain chat.
+    const topicId =
+      (await ensureClientTopic(tx.contact.id, from, seller)) ?? (await getSellerLineTopic(tx.sellerId, line.id));
     const sent = await sendTelegramMessage(seller.telegramUserId, text, { messageThreadId: topicId ?? undefined });
     if (sent.ok && sent.messageId) {
       notified = true;

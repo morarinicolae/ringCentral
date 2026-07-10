@@ -122,9 +122,13 @@ export async function pollInboundSmsOnce(): Promise<void> {
           });
           logger.info('poll_inbound_sms', { from: m.from, text: (detail.text || '').slice(0, 40) });
         }
-      } else {
-        // Classic account: inbound SMS lives in the extension message store and
-        // already carries the text in `subject`.
+      }
+      // Classic message store: the only source on non-A2P accounts; on A2P
+      // accounts it is polled ONLY for replies to the SMS override number
+      // (line-number traffic arrives via the A2P feed — avoids duplicates).
+      if (!rc.useA2p || config.ringcentral.smsFrom) {
+        const acceptTo = (t: string) =>
+          rc.useA2p ? Boolean(config.ringcentral.smsFrom) && t === config.ringcentral.smsFrom : numbers.has(t);
         const r = await fetch(
           `${rc.serverUrl}/restapi/v1.0/account/~/extension/~/message-store?direction=Inbound&messageType=SMS&dateFrom=${encodeURIComponent(dateFrom)}&perPage=50`,
           { headers: auth },
@@ -136,7 +140,7 @@ export async function pollInboundSmsOnce(): Promise<void> {
         }
         for (const m of j.records || []) {
           const tos = (m.to || []).map((x: any) => x.phoneNumber);
-          if (!tos.some((t: string) => numbers.has(t))) continue;
+          if (!tos.some((t: string) => acceptTo(t))) continue;
           const id = `ms-${m.id}`;
           if (seenSms.has(id)) continue;
           seenSms.add(id);

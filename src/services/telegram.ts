@@ -26,6 +26,37 @@ export function resetTelegramOutbox(): void {
 
 const usingMock = () => !config.telegram.botToken;
 
+// Mock forum topics (tests/dev without a bot token).
+let mockTopicCounter = 9000;
+
+/**
+ * Create a forum TOPIC in a seller's group (per-client thread). Returns the
+ * message_thread_id, or null when the chat is not a forum / bot lacks rights.
+ * Requires the group to have Topics enabled and the bot to be an admin with
+ * "Manage topics".
+ */
+export async function createForumTopic(chatId: string, name: string): Promise<string | null> {
+  if (usingMock()) {
+    return String(++mockTopicCounter);
+  }
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${config.telegram.botToken}/createForumTopic`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, name: name.slice(0, 128) }),
+    });
+    const json = (await res.json()) as { ok: boolean; result?: { message_thread_id: number }; description?: string };
+    if (!json.ok || !json.result) {
+      logger.warn('telegram_create_topic_failed', { chatId, name, error: json.description });
+      return null;
+    }
+    return String(json.result.message_thread_id);
+  } catch (err) {
+    logger.warn('telegram_create_topic_failed', { chatId, name, error: err instanceof Error ? err.message : String(err) });
+    return null;
+  }
+}
+
 /**
  * Send a Telegram message to a seller.
  * `chatId` is the seller's Telegram target — either a 1:1 chat id (== their
