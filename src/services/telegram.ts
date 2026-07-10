@@ -153,17 +153,23 @@ export function formatOptOutNotification(clientPhone: string, body: string, line
   ].join('\n');
 }
 
-/** Format the inbound-call notification a seller receives. */
+/** Format the inbound-call notification a seller receives. A missed call is a
+ * CALLBACK TASK for the assigned seller (and only them): the client stays
+ * theirs and they call back via /call. */
 export function formatCallNotification(clientPhone: string, result: string, durationSec?: number, line?: LineInfo): string {
   const icon = result === 'missed' ? '📵' : result === 'voicemail' ? '📩' : '📞';
   const label =
     result === 'missed'
-      ? 'Missed call'
+      ? 'Missed call — CALLBACK TASK'
       : result === 'answered'
         ? 'Answered call'
         : result === 'voicemail'
           ? 'Voicemail'
           : 'Call';
   const dur = durationSec != null ? ` (${durationSec}s)` : '';
-  return [`${icon} ${label}${dur}`, '', ...lineHeader(line), `Client: ${clientPhone}`, '', 'This caller is assigned to you.'].join('\n');
+  const footer =
+    result === 'missed' || result === 'voicemail'
+      ? 'This caller is assigned to YOU. Call them back: reply /call to this message.'
+      : 'This caller is assigned to you.';
+  return [`${icon} ${label}${dur}`, '', ...lineHeader(line), `Client: ${clientPhone}`, '', footer].join('\n');
 }
