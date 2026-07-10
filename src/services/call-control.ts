@@ -49,9 +49,11 @@ export async function createTelephonySubscription(
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      eventFilters: ['/restapi/v1.0/account/~/telephony/sessions'],
+      // ?direction=Inbound is a server-side pre-filter so we only receive
+      // inbound-call events (much less webhook volume).
+      eventFilters: ['/restapi/v1.0/account/~/telephony/sessions?direction=Inbound'],
       deliveryMode: { transportType: 'WebHook', address: webhookUrl },
-      expiresIn: 604800, // 7 days (max); renew before expiry
+      expiresIn: 604800, // 7 days (webhook cap); ensureTelephonySubscription refreshes it
     }),
   });
   const raw: any = await res.json().catch(() => ({}));
