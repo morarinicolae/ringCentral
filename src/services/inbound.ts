@@ -3,7 +3,7 @@ import { logger, Decision } from '../logger';
 import { InboundSms } from '../types';
 import { normalizeE164, isValidE164 } from './phone';
 import { isOptOut } from './optout';
-import { assignNextSeller } from './routing';
+import { assignNextSeller, getSellerLineTopic } from './routing';
 import { resolveLineByNumber } from './lines';
 import { writeAudit } from './audit';
 import { sendTelegramMessage, formatInboundNotification, formatOptOutNotification } from './telegram';
@@ -153,7 +153,8 @@ export async function processInboundSms(inbound: InboundSms): Promise<InboundRes
   } else {
     const lineInfo = { name: line.name, phone: line.phoneE164 };
     const text = optedOut ? formatOptOutNotification(from, body, lineInfo) : formatInboundNotification(from, body, lineInfo);
-    const sent = await sendTelegramMessage(seller.telegramUserId, text);
+    const topicId = await getSellerLineTopic(tx.sellerId, line.id);
+    const sent = await sendTelegramMessage(seller.telegramUserId, text, { messageThreadId: topicId ?? undefined });
     if (sent.ok && sent.messageId) {
       notified = true;
       await prisma.message.update({

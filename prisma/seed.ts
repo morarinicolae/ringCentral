@@ -26,6 +26,7 @@ interface Row {
   sellerTelegram: string;
   lineNumber: string;
   lineName: string;
+  topicId?: string;
 }
 
 function buildRows(): Row[] {
@@ -42,6 +43,8 @@ function buildRows(): Row[] {
       sellerTelegram: tg,
       lineNumber,
       lineName,
+      // Optional forum topic for this seller's line (message_thread_id in their group).
+      topicId: process.env[`SELLER${n}_TOPIC`],
     });
   }
   return rows;
@@ -60,13 +63,19 @@ async function main() {
     const rs = await prisma.routingState.findUnique({ where: { lineId: line.id } });
     if (!rs) await prisma.routingState.create({ data: { lineId: line.id, mode: 'round_robin' } });
 
-    await prisma.seller.upsert({
+    const seller = await prisma.seller.upsert({
       where: { telegramUserId: r.sellerTelegram },
       update: { name: r.sellerName, priority, isActive: true, lineId: line.id },
       create: { name: r.sellerName, telegramUserId: r.sellerTelegram, priority, isActive: true, lineId: line.id },
     });
+    // Membership row (round-robin source of truth + per-number forum topic).
+    await prisma.sellerLine.upsert({
+      where: { sellerId_lineId: { sellerId: seller.id, lineId: line.id } },
+      update: { priority, isActive: true, ...(r.topicId ? { telegramTopicId: r.topicId } : {}) },
+      create: { sellerId: seller.id, lineId: line.id, priority, isActive: true, telegramTopicId: r.topicId ?? null },
+    });
     // eslint-disable-next-line no-console
-    console.log(`Seeded ${r.sellerName} (telegram ${r.sellerTelegram}) on line "${r.lineName}" (${r.lineNumber})`);
+    console.log(`Seeded ${r.sellerName} (telegram ${r.sellerTelegram}) on line "${r.lineName}" (${r.lineNumber})${r.topicId ? ` topic ${r.topicId}` : ''}`);
     priority += 10;
   }
 

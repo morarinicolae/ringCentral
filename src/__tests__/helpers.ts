@@ -15,6 +15,7 @@ export async function resetDb(): Promise<void> {
   await prisma.conversation.deleteMany();
   await prisma.contact.deleteMany();
   await prisma.routingState.deleteMany();
+  await prisma.sellerLine.deleteMany();
   await prisma.seller.deleteMany();
   await prisma.line.deleteMany();
   await prisma.auditLog.deleteMany();
@@ -50,6 +51,7 @@ export async function seedSellers(count = 3): Promise<SeededSeller[]> {
         lineId: line.id,
       },
     });
+    await prisma.sellerLine.create({ data: { sellerId: s.id, lineId: line.id, priority: i * 10, isActive: true } });
     sellers.push({ id: s.id, name: s.name, telegramUserId: s.telegramUserId! });
   }
   return sellers;
@@ -62,7 +64,24 @@ export async function seedSecondLine(number: string, sellerTelegram = '299999') 
   const seller = await prisma.seller.create({
     data: { name: 'Seller B', telegramUserId: sellerTelegram, priority: 10, isActive: true, lineId: line.id },
   });
+  await prisma.sellerLine.create({ data: { sellerId: seller.id, lineId: line.id, priority: 10, isActive: true } });
   return { line, seller };
+}
+
+/**
+ * Put an existing seller on ANOTHER line (multi-number setup) with a forum topic
+ * id, so inbound on that line posts into that topic inside the seller's group.
+ */
+export async function addSellerToLine(sellerId: string, lineId: string, telegramTopicId?: string, priority = 10) {
+  return prisma.sellerLine.create({ data: { sellerId, lineId, telegramTopicId, priority, isActive: true } });
+}
+
+/** Set (or update) the forum topic a seller's inbound on a line lands in. */
+export async function setSellerLineTopic(sellerId: string, lineId: string, telegramTopicId: string) {
+  return prisma.sellerLine.update({
+    where: { sellerId_lineId: { sellerId, lineId } },
+    data: { telegramTopicId },
+  });
 }
 
 /**

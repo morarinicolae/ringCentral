@@ -14,6 +14,7 @@ export interface OutboxItem {
   chatId: string;
   text: string;
   replyToMessageId?: string;
+  messageThreadId?: string;
   messageId: string;
 }
 export const telegramOutbox: OutboxItem[] = [];
@@ -26,19 +27,21 @@ export function resetTelegramOutbox(): void {
 const usingMock = () => !config.telegram.botToken;
 
 /**
- * Send a Telegram message to a private chat.
- * `chatId` is the seller's private chat id (== their telegram_user_id for a
- * 1:1 chat with the bot). We NEVER send to group chats.
+ * Send a Telegram message to a seller.
+ * `chatId` is the seller's Telegram target — either a 1:1 chat id (== their
+ * telegram_user_id) or a group/forum chat id (negative). `messageThreadId`, when
+ * set, posts into a specific forum topic so a seller who serves several company
+ * numbers gets each number in its own topic inside their group.
  */
 export async function sendTelegramMessage(
   chatId: string,
   text: string,
-  opts: { replyToMessageId?: string } = {},
+  opts: { replyToMessageId?: string; messageThreadId?: string } = {},
 ): Promise<TelegramSendResult> {
   if (usingMock()) {
     const messageId = String(++mockMessageCounter);
-    telegramOutbox.push({ chatId, text, replyToMessageId: opts.replyToMessageId, messageId });
-    logger.debug('telegram_mock_send', { chatId, messageId, text });
+    telegramOutbox.push({ chatId, text, replyToMessageId: opts.replyToMessageId, messageThreadId: opts.messageThreadId, messageId });
+    logger.debug('telegram_mock_send', { chatId, messageId, text, messageThreadId: opts.messageThreadId });
     return { ok: true, messageId, chatId };
   }
 
@@ -49,6 +52,8 @@ export async function sendTelegramMessage(
       body: JSON.stringify({
         chat_id: chatId,
         text,
+        // Post into a specific forum topic (per-number topic in the seller's group).
+        ...(opts.messageThreadId ? { message_thread_id: Number(opts.messageThreadId) } : {}),
         // reply_to_message_id keeps the seller's thread anchored to the client
         // notification; the seller replies to that message to answer the client.
         ...(opts.replyToMessageId ? { reply_to_message_id: Number(opts.replyToMessageId) } : {}),
@@ -74,6 +79,8 @@ export interface ParsedTelegramMessage {
   text: string;
   messageId: string;
   replyToMessageId?: string;
+  // Forum topic (message_thread_id) the message is in, for group/forum chats.
+  messageThreadId?: string;
   isPrivateChat: boolean;
 }
 
@@ -86,15 +93,20 @@ export function parseTelegramUpdate(update: any): ParsedTelegramMessage | null {
   if (!message || typeof message.text !== 'string') return null;
   if (!message.from?.id || !message.chat?.id) return null;
 
+  // In a forum, a plain message in a topic carries reply_to_message pointing at
+  // the topic-creation service message. That is NOT a real reply to a
+  // notification, so ignore it (only genuine replies count — rule: no guessing).
+  const rt = message.reply_to_message;
+  const isRealReply = rt?.message_id && !rt.forum_topic_created && rt.message_id !== message.message_thread_id;
+
   return {
     updateId: update.update_id,
     chatId: String(message.chat.id),
     fromId: String(message.from.id),
     text: message.text,
     messageId: String(message.message_id),
-    replyToMessageId: message.reply_to_message?.message_id
-      ? String(message.reply_to_message.message_id)
-      : undefined,
+    replyToMessageId: isRealReply ? String(rt.message_id) : undefined,
+    messageThreadId: message.message_thread_id != null ? String(message.message_thread_id) : undefined,
     isPrivateChat: message.chat.type === 'private',
   };
 }

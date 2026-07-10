@@ -64,13 +64,23 @@ const HTML = /* html */ `<!doctype html>
   <section>
     <h2>Vânzători</h2>
     <table id="sellerTable"><thead>
-      <tr><th>Nume</th><th>Linie</th><th>Telegram ID</th><th>Activ</th><th></th></tr>
+      <tr><th>Nume</th><th>Numere &amp; topic-uri</th><th>Telegram ID (grup/chat)</th><th>Activ</th><th></th></tr>
     </thead><tbody></tbody></table>
     <div class="row" style="margin-top:12px">
       <input id="nName" placeholder="Nume" style="width:130px" />
-      <input id="nTg" placeholder="Telegram ID" style="width:120px" />
+      <input id="nTg" placeholder="Telegram ID / grup (-100…)" style="width:190px" />
       <select id="nLine"></select>
+      <input id="nTopic" placeholder="Topic ID (opțional)" style="width:150px" />
       <button onclick="createSeller()">+ Adaugă vânzător</button>
+    </div>
+    <div class="muted" style="margin-top:14px; font-size:13px">
+      <b>Un vânzător pe mai multe numere</b> (fiecare număr → topicul lui în grupul vânzătorului):
+    </div>
+    <div class="row" style="margin-top:8px">
+      <select id="mSeller"></select>
+      <select id="mLine"></select>
+      <input id="mTopic" placeholder="Topic ID" style="width:130px" />
+      <button onclick="addSellerLine()">Pune pe număr / setează topic</button>
     </div>
   </section>
 
@@ -127,12 +137,20 @@ function renderLines(rows) {
   $('#nLine').innerHTML = '<option value="">(fără linie)</option>' + rows.map(l=>'<option value="'+l.id+'">'+esc(l.name)+'</option>').join('');
 }
 function renderSellers(rows) {
+  const numbers = (s) => {
+    const list = (s.lines && s.lines.length) ? s.lines : (s.line ? [{line_name:s.line.name, telegram_topic_id:null}] : []);
+    if (!list.length) return '<span class="muted">—</span>';
+    return list.map(m => esc(m.line_name) + (m.telegram_topic_id ? ' → topic <code>'+esc(m.telegram_topic_id)+'</code>' : ' <span class="muted">(fără topic)</span>')).join('<br>');
+  };
   $('#sellerTable tbody').innerHTML = rows.map(s =>
-    '<tr><td>'+esc(s.name)+'</td><td>'+esc(s.line?s.line.name:'—')+'</td>'
+    '<tr><td>'+esc(s.name)+'</td><td>'+numbers(s)+'</td>'
     + '<td><code>'+esc(s.telegramUserId||'—')+'</code></td>'
     + '<td><span class="pill '+(s.isActive?'active':'inactive')+'">'+(s.isActive?'activ':'inactiv')+'</span></td>'
     + '<td><button class="ghost" onclick="toggle(\\''+s.id+'\\','+(!s.isActive)+')">'+(s.isActive?'Dezactivează':'Activează')+'</button></td></tr>').join('')
     || '<tr><td colspan="5" class="muted">Niciun vânzător.</td></tr>';
+  // membership form dropdowns
+  $('#mSeller').innerHTML = rows.map(s=>'<option value="'+s.id+'">'+esc(s.name)+'</option>').join('');
+  $('#mLine').innerHTML = LINES.map(l=>'<option value="'+l.id+'">'+esc(l.name)+'</option>').join('');
 }
 function renderConvs(rows) {
   const opts=(sel)=>SELLERS.map(s=>'<option value="'+s.id+'"'+(sel===s.id?' selected':'')+'>'+esc(s.name)+'</option>').join('');
@@ -164,9 +182,15 @@ async function createLine() {
   catch(e){ setStatus(e.message,'err'); }
 }
 async function createSeller() {
-  const name=$('#nName').value.trim(), tg=$('#nTg').value.trim(), line_id=$('#nLine').value||undefined;
+  const name=$('#nName').value.trim(), tg=$('#nTg').value.trim(), line_id=$('#nLine').value||undefined, telegram_topic_id=$('#nTopic').value.trim()||undefined;
   if(!name){ setStatus('Numele e obligatoriu.','err'); return; }
-  try { await api('/admin/sellers',{method:'POST',body:JSON.stringify({name,telegram_user_id:tg||undefined,line_id})}); $('#nName').value='';$('#nTg').value=''; setStatus('Vânzător adăugat.','ok'); loadAll(); }
+  try { await api('/admin/sellers',{method:'POST',body:JSON.stringify({name,telegram_user_id:tg||undefined,line_id,telegram_topic_id})}); $('#nName').value='';$('#nTg').value='';$('#nTopic').value=''; setStatus('Vânzător adăugat.','ok'); loadAll(); }
+  catch(e){ setStatus(e.message,'err'); }
+}
+async function addSellerLine() {
+  const seller_id=$('#mSeller').value, line_id=$('#mLine').value, telegram_topic_id=$('#mTopic').value.trim()||null;
+  if(!seller_id||!line_id){ setStatus('Alege vânzător + linie.','err'); return; }
+  try { await api('/admin/seller-lines',{method:'POST',body:JSON.stringify({seller_id,line_id,telegram_topic_id})}); $('#mTopic').value=''; setStatus('Setat.','ok'); loadAll(); }
   catch(e){ setStatus(e.message,'err'); }
 }
 async function toggle(id, active) { try { await api('/admin/sellers/'+id,{method:'PATCH',body:JSON.stringify({is_active:active})}); loadAll(); } catch(e){ setStatus(e.message,'err'); } }

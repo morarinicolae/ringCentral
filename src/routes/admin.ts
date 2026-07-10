@@ -157,6 +157,8 @@ const CreateSellerSchema = z.object({
   telegram_user_id: z.string().min(1).optional(),
   ringcentral_extension_id: z.string().optional(),
   line_id: z.string().min(1).optional(),
+  // Forum topic (message_thread_id) for this line inside the seller's group.
+  telegram_topic_id: z.string().min(1).optional(),
   is_active: z.boolean().optional(),
   priority: z.number().int().optional(),
 });
@@ -178,6 +180,13 @@ adminRouter.post('/sellers', async (req, res) => {
         priority: d.priority ?? 100,
       },
     });
+    // If placed on a line, record the membership (source of truth for round-robin
+    // + the per-number topic).
+    if (d.line_id) {
+      await prisma.sellerLine.create({
+        data: { sellerId: seller.id, lineId: d.line_id, telegramTopicId: d.telegram_topic_id ?? null, priority: d.priority ?? 100, isActive: d.is_active ?? true },
+      });
+    }
     await writeAudit({ actorType: 'admin', action: 'seller_created', entityType: 'seller', entityId: seller.id, details: { name: seller.name } });
     res.status(201).json({ ok: true, seller });
   } catch (err: any) {
@@ -187,6 +196,64 @@ adminRouter.post('/sellers', async (req, res) => {
     }
     throw err;
   }
+});
+
+/**
+ * POST /admin/seller-lines — put a seller on a line (a company number) and set
+ * the forum topic their inbound from that number lands in. Idempotent (upsert on
+ * seller+line). This is how one seller serves several numbers, each in its own
+ * topic inside their group.
+ */
+const SellerLineSchema = z.object({
+  seller_id: z.string().min(1),
+  line_id: z.string().min(1),
+  telegram_topic_id: z.string().nullable().optional(),
+  priority: z.number().int().optional(),
+  is_active: z.boolean().optional(),
+});
+adminRouter.post('/seller-lines', async (req, res) => {
+  const parsed = SellerLineSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'invalid_body', details: parsed.error.flatten() });
+    return;
+  }
+  const d = parsed.data;
+  const seller = await prisma.seller.findUnique({ where: { id: d.seller_id } });
+  const line = await prisma.line.findUnique({ where: { id: d.line_id } });
+  if (!seller || !line) {
+    res.status(404).json({ error: !seller ? 'seller_not_found' : 'line_not_found' });
+    return;
+  }
+  const membership = await prisma.sellerLine.upsert({
+    where: { sellerId_lineId: { sellerId: d.seller_id, lineId: d.line_id } },
+    update: {
+      ...(d.telegram_topic_id !== undefined ? { telegramTopicId: d.telegram_topic_id } : {}),
+      ...(d.priority !== undefined ? { priority: d.priority } : {}),
+      ...(d.is_active !== undefined ? { isActive: d.is_active } : {}),
+    },
+    create: {
+      sellerId: d.seller_id,
+      lineId: d.line_id,
+      telegramTopicId: d.telegram_topic_id ?? null,
+      priority: d.priority ?? 100,
+      isActive: d.is_active ?? true,
+    },
+  });
+  await writeAudit({ actorType: 'admin', action: 'seller_line_set', entityType: 'seller', entityId: d.seller_id, details: { lineId: d.line_id, topic: membership.telegramTopicId } });
+  res.status(201).json({ ok: true, seller_line: membership });
+});
+
+/** DELETE /admin/seller-lines — remove a seller from a line. */
+adminRouter.delete('/seller-lines', async (req, res) => {
+  const parsed = z.object({ seller_id: z.string().min(1), line_id: z.string().min(1) }).safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'invalid_body', details: parsed.error.flatten() });
+    return;
+  }
+  const { seller_id, line_id } = parsed.data;
+  await prisma.sellerLine.deleteMany({ where: { sellerId: seller_id, lineId: line_id } });
+  await writeAudit({ actorType: 'admin', action: 'seller_line_removed', entityType: 'seller', entityId: seller_id, details: { lineId: line_id } });
+  res.json({ ok: true });
 });
 
 /** PATCH /admin/sellers/:id — edit / activate / deactivate. */
@@ -225,11 +292,11 @@ adminRouter.patch('/sellers/:id', async (req, res) => {
   res.json({ ok: true, seller });
 });
 
-/** GET /admin/sellers — list sellers with their line (handy for reassign UIs / tests). */
+/** GET /admin/sellers — list sellers with their line(s) + per-number topics. */
 adminRouter.get('/sellers', async (_req, res) => {
   const sellers = await prisma.seller.findMany({
     orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }],
-    include: { line: true },
+    include: { line: true, sellerLines: { include: { line: true }, orderBy: { priority: 'asc' } } },
   });
   res.json({
     count: sellers.length,
@@ -240,6 +307,15 @@ adminRouter.get('/sellers', async (_req, res) => {
       isActive: s.isActive,
       priority: s.priority,
       line: s.line ? { id: s.line.id, name: s.line.name, phone: s.line.phoneE164 } : null,
+      // Every number this seller serves + the forum topic each lands in.
+      lines: s.sellerLines.map((m) => ({
+        line_id: m.lineId,
+        line_name: m.line.name,
+        line_phone: m.line.phoneE164,
+        telegram_topic_id: m.telegramTopicId,
+        priority: m.priority,
+        is_active: m.isActive,
+      })),
     })),
   });
 });

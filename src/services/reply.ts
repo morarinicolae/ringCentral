@@ -30,8 +30,8 @@ export interface ReplyResult {
   outboundMessageId?: string;
 }
 
-async function replyToSeller(chatId: string, text: string, replyToMessageId?: string): Promise<void> {
-  await sendTelegramMessage(chatId, text, { replyToMessageId });
+async function replyToSeller(chatId: string, text: string, replyToMessageId?: string, messageThreadId?: string): Promise<void> {
+  await sendTelegramMessage(chatId, text, { replyToMessageId, messageThreadId });
 }
 
 /**
@@ -47,35 +47,41 @@ async function replyToSeller(chatId: string, text: string, replyToMessageId?: st
  *   - The actual send goes through sendSms(), which re-validates ownership.
  */
 export async function processSellerReply(msg: ParsedTelegramMessage): Promise<ReplyResult> {
-  // We only route private 1:1 chats. Never groups.
-  if (!msg.isPrivateChat) {
-    logger.warn('telegram_non_private_ignored', { chatId: msg.chatId });
-    return { handled: false, outcome: 'ignored' };
-  }
-
-  const seller = await prisma.seller.findUnique({ where: { telegramUserId: msg.fromId } });
+  // The seller's Telegram target — a 1:1 chat OR their team group — IS the
+  // identity: notifications are posted to that chat id and replies come back
+  // from it. In a private chat chatId == the seller's user id; in a group it's
+  // the group id (a personal user id of a group member never matches a seller).
+  const seller = await prisma.seller.findUnique({ where: { telegramUserId: msg.chatId } });
   const isAdmin = config.adminTelegramIds.includes(msg.fromId);
+  const thread = msg.messageThreadId;
 
-  // Lightweight helper commands.
+  // Lightweight helper commands. Echoes the ids needed to wire up a group:
+  // the CHAT id (set as the seller's Telegram target) and the TOPIC id.
   if (msg.text.trim().startsWith('/')) {
     const help = [
-      `Your Telegram ID is ${msg.fromId}.`,
-      seller ? `You are registered as seller "${seller.name}".` : 'You are not yet registered as a seller.',
-      'To answer a client, reply directly to one of the client message notifications I send you.',
+      `Chat ID: ${msg.chatId}`,
+      thread ? `Topic ID: ${thread}` : `Your user ID: ${msg.fromId}`,
+      seller ? `This chat is the target for seller "${seller.name}".` : 'This chat is not yet linked to a seller.',
+      'To answer a client, reply directly to one of the client message notifications I send here.',
     ].join('\n');
-    await replyToSeller(msg.chatId, help, msg.messageId);
+    await replyToSeller(msg.chatId, help, msg.messageId, thread);
     return { handled: true, outcome: 'command', replyText: help };
   }
 
   if (!seller && !isAdmin) {
-    await replyToSeller(msg.chatId, MSG_NOT_REGISTERED, msg.messageId);
-    logger.warn('telegram_unknown_sender', { fromId: msg.fromId });
+    // Never spam an unrelated group the bot happens to be in.
+    if (!msg.isPrivateChat) {
+      logger.warn('telegram_unlinked_group_ignored', { chatId: msg.chatId });
+      return { handled: false, outcome: 'ignored' };
+    }
+    await replyToSeller(msg.chatId, MSG_NOT_REGISTERED, msg.messageId, thread);
+    logger.warn('telegram_unknown_sender', { fromId: msg.fromId, chatId: msg.chatId });
     return { handled: true, outcome: 'not_registered', replyText: MSG_NOT_REGISTERED };
   }
 
   // Rule 3: no blind replies. A reply must reference a specific notification.
   if (!msg.replyToMessageId) {
-    await replyToSeller(msg.chatId, MSG_NO_CONTEXT, msg.messageId);
+    await replyToSeller(msg.chatId, MSG_NO_CONTEXT, msg.messageId, thread);
     logger.info('reply_without_context_blocked', { fromId: msg.fromId });
     return { handled: true, outcome: 'no_context', replyText: MSG_NO_CONTEXT };
   }
@@ -86,7 +92,7 @@ export async function processSellerReply(msg: ParsedTelegramMessage): Promise<Re
     orderBy: { createdAt: 'desc' },
   });
   if (!notification) {
-    await replyToSeller(msg.chatId, MSG_UNKNOWN_CONTEXT, msg.messageId);
+    await replyToSeller(msg.chatId, MSG_UNKNOWN_CONTEXT, msg.messageId, thread);
     logger.info('reply_context_not_found', { fromId: msg.fromId, replyToMessageId: msg.replyToMessageId });
     return { handled: true, outcome: 'unknown_context', replyText: MSG_UNKNOWN_CONTEXT };
   }
@@ -96,7 +102,7 @@ export async function processSellerReply(msg: ParsedTelegramMessage): Promise<Re
     include: { contact: true, line: true },
   });
   if (!conversation || !conversation.contact) {
-    await replyToSeller(msg.chatId, MSG_UNKNOWN_CONTEXT, msg.messageId);
+    await replyToSeller(msg.chatId, MSG_UNKNOWN_CONTEXT, msg.messageId, thread);
     return { handled: true, outcome: 'unknown_context', replyText: MSG_UNKNOWN_CONTEXT };
   }
 
@@ -105,7 +111,7 @@ export async function processSellerReply(msg: ParsedTelegramMessage): Promise<Re
   // checked against the resolved seller id.
   const actingSellerId = seller?.id ?? conversation.assignedSellerId ?? undefined;
   if (!seller || conversation.assignedSellerId !== seller.id) {
-    await replyToSeller(msg.chatId, MSG_NOT_YOUR_CONVERSATION, msg.messageId);
+    await replyToSeller(msg.chatId, MSG_NOT_YOUR_CONVERSATION, msg.messageId, thread);
     logger.warn(Decision.UNAUTHORIZED_REPLY, {
       fromId: msg.fromId,
       sellerId: seller?.id,
@@ -127,13 +133,13 @@ export async function processSellerReply(msg: ParsedTelegramMessage): Promise<Re
 
   // Rule 5: opt-out (and other non-sendable statuses) block the send.
   if (contact.status === 'opt_out') {
-    await replyToSeller(msg.chatId, MSG_OPTED_OUT, msg.messageId);
+    await replyToSeller(msg.chatId, MSG_OPTED_OUT, msg.messageId, thread);
     logger.info('reply_to_opted_out_blocked', { conversationId: conversation.id, contactId: contact.id });
     return { handled: true, outcome: 'blocked_opt_out', replyText: MSG_OPTED_OUT, conversationId: conversation.id };
   }
   if (contact.status === 'blocked' || contact.status === 'closed') {
     const text = `This conversation is ${contact.status}. SMS cannot be sent.`;
-    await replyToSeller(msg.chatId, text, msg.messageId);
+    await replyToSeller(msg.chatId, text, msg.messageId, thread);
     return { handled: true, outcome: 'blocked_ownership', replyText: text, conversationId: conversation.id };
   }
 
@@ -197,7 +203,7 @@ export async function processSellerReply(msg: ParsedTelegramMessage): Promise<Re
     confirmation = `❌ SMS to ${contact.phoneE164} FAILED: ${result.failureReason ?? 'unknown error'}`;
     outcome = 'failed';
   }
-  await replyToSeller(msg.chatId, confirmation, msg.messageId);
+  await replyToSeller(msg.chatId, confirmation, msg.messageId, thread);
 
   logger.info('seller_reply_processed', { conversationId: conversation.id, outboundMessageId: outbound.id, outcome, actingSellerId });
   return { handled: true, outcome, replyText: confirmation, conversationId: conversation.id, outboundMessageId: outbound.id };

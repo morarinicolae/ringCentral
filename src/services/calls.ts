@@ -1,7 +1,7 @@
 import { prisma } from '../db';
 import { logger, Decision } from '../logger';
 import { normalizeE164, isValidE164 } from './phone';
-import { assignNextSeller } from './routing';
+import { assignNextSeller, getSellerLineTopic } from './routing';
 import { resolveLineByNumber } from './lines';
 import { writeAudit } from './audit';
 import { sendTelegramMessage, formatCallNotification } from './telegram';
@@ -123,7 +123,8 @@ export async function processInboundCall(call: InboundCall): Promise<CallResult>
   let notified = false;
   if (seller?.telegramUserId) {
     const text = formatCallNotification(from, result, call.durationSec, { name: line.name, phone: line.phoneE164 });
-    const sent = await sendTelegramMessage(seller.telegramUserId, text);
+    const topicId = await getSellerLineTopic(tx.sellerId, line.id);
+    const sent = await sendTelegramMessage(seller.telegramUserId, text, { messageThreadId: topicId ?? undefined });
     if (sent.ok && sent.messageId) {
       notified = true;
       await prisma.call.update({

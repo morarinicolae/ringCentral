@@ -32,6 +32,7 @@ model Line {
   updatedAt  DateTime @updatedAt @map("updated_at")
 
   sellers        Seller[]
+  sellerLines    SellerLine[]
   contacts       Contact[]
   conversations  Conversation[]
   messages       Message[]
@@ -55,6 +56,7 @@ model Seller {
   updatedAt              DateTime  @updatedAt @map("updated_at")
 
   line          Line?          @relation(fields: [lineId], references: [id])
+  sellerLines   SellerLine[]
   contacts      Contact[]
   conversations Conversation[]
   messages      Message[]
@@ -62,6 +64,32 @@ model Seller {
 
   @@index([lineId, isActive, priority, id])
   @@map("sellers")
+}
+
+// Which lines (company numbers) a seller serves, and — when the seller's
+// Telegram target is a FORUM GROUP — which topic (message_thread_id) inbound
+// from that line lands in. Lets one seller receive from multiple numbers, each
+// number sorted into its own topic inside the seller's group.
+//   Seller.telegramUserId = the group chat id (e.g. -1004324324)
+//   SellerLine.telegramTopicId = the topic for THIS line inside that group
+model SellerLine {
+  id              String   @id @default(cuid())
+  sellerId        String   @map("seller_id")
+  lineId          String   @map("line_id")
+  // Telegram forum topic (message_thread_id). Null = post to the group's
+  // General thread / a plain (non-forum) chat.
+  telegramTopicId String?  @map("telegram_topic_id")
+  priority        Int      @default(100)
+  isActive        Boolean  @default(true) @map("is_active")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  seller Seller @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+  line   Line   @relation(fields: [lineId], references: [id], onDelete: Cascade)
+
+  @@unique([sellerId, lineId])
+  @@index([lineId, isActive, priority, id])
+  @@map("seller_lines")
 }
 
 model Contact {
