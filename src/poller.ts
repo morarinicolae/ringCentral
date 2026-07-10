@@ -3,6 +3,7 @@ import { prisma } from './db';
 import { getAccessTokenFor, rcConfigForLine, rcAccountKey, RcConfig } from './services/ringcentral';
 import { processInboundCall } from './services/calls';
 import { ensureTelephonySubscription } from './services/call-control';
+import { syncQueueRuleForSeller } from './services/queue-rules';
 import { logger } from './logger';
 
 /**
@@ -168,6 +169,30 @@ export async function pollA2pOnce(): Promise<void> {
  * Poll the RingCentral call log for recent INBOUND calls and record any that
  * were placed to one of our configured line numbers (answered OR missed).
  */
+/**
+ * Queue mode: figure out WHICH SELLER answered this call from the detailed
+ * call-log legs (the accepted leg's extension, ignoring the queue's own leg),
+ * matched against sellers' ringcentralExtensionId.
+ */
+async function answeredSellerFromLegs(record: any): Promise<string | null> {
+  const legs: any[] = record?.legs ?? [];
+  if (!legs.length) return null;
+  const queueExtId = config.ringcentral.queueExtensionId;
+  const accepted = legs.filter((l) => {
+    const res = (l?.result ?? '').toLowerCase();
+    const extId = l?.extension?.id != null ? String(l.extension.id) : null;
+    return (res.includes('accept') || res.includes('connected')) && extId && extId !== queueExtId;
+  });
+  if (!accepted.length) return null;
+  const sellers = await prisma.seller.findMany({ where: { isActive: true, ringcentralExtensionId: { not: null } } });
+  for (const leg of accepted) {
+    const extId = String(leg.extension.id);
+    const seller = sellers.find((s) => s.ringcentralExtensionId === extId);
+    if (seller) return seller.id;
+  }
+  return null;
+}
+
 export async function pollCallsOnce(): Promise<void> {
   const accounts = await activeAccounts();
   const dateFrom = new Date(Date.now() - 10 * 60_000).toISOString();
@@ -189,16 +214,28 @@ export async function pollCallsOnce(): Promise<void> {
         if (!to || !from || !numbers.has(to)) continue;
         if (seenCalls.has(c.id)) continue;
         seenCalls.add(c.id);
-        const res = await processInboundCall({
-          from,
-          to,
-          ringcentralCallId: c.id,
-          result: c.result,
-          durationSec: typeof c.duration === 'number' ? c.duration : undefined,
-          startedAt: c.startTime,
-        });
+
+        // Queue mode: ownership follows whoever ANSWERED (from the call legs).
+        const answeredSellerId = config.callAssignMode === 'answered' ? await answeredSellerFromLegs(c) : null;
+
+        const res = await processInboundCall(
+          {
+            from,
+            to,
+            ringcentralCallId: c.id,
+            result: c.result,
+            durationSec: typeof c.duration === 'number' ? c.duration : undefined,
+            startedAt: c.startTime,
+          },
+          { answeredSellerId },
+        );
         if (res.status === 'processed') {
-          logger.info('poll_inbound_call', { from, to, result: res.result, sellerId: res.sellerId });
+          logger.info('poll_inbound_call', { from, to, result: res.result, sellerId: res.sellerId, answeredSellerId });
+          // Native sticky: refresh the queue rule so this caller's future calls
+          // ring their seller directly (skips queue rotation).
+          if (config.callAssignMode === 'answered' && res.sellerId) {
+            syncQueueRuleForSeller(res.sellerId).catch(() => {});
+          }
         }
       }
     } catch (e) {

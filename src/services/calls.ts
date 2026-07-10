@@ -1,4 +1,5 @@
 import { prisma } from '../db';
+import { config } from '../config';
 import { logger, Decision } from '../logger';
 import { normalizeE164, isValidE164 } from './phone';
 import { assignNextSeller, getSellerLineTopic } from './routing';
@@ -88,14 +89,21 @@ export async function getOrAssignSellerForCall(
   return { line: { id: line.id, name: line.name, phoneE164: line.phoneE164 }, seller, isNewContact: isNew };
 }
 
+export interface ProcessCallOpts {
+  /** 'roundrobin' (app assigns) or 'answered' (queue mode: owner = who answered). */
+  assignMode?: 'roundrobin' | 'answered';
+  /** In 'answered' mode: the seller whose extension ANSWERED this call (from call-log legs). */
+  answeredSellerId?: string | null;
+}
+
 /**
  * Process one INBOUND call: resolve the line (from the number that was called),
- * find/create the per-line contact, assign a seller (same client -> same seller,
- * new client -> round-robin among the line's team), record the call in the DB
- * (answered/missed/duration — regardless of outcome), and privately notify the
- * assigned seller. Idempotent by ringcentral_call_id.
+ * find/create the per-line contact, assign a seller (same client -> same seller;
+ * new client -> round-robin, or in queue mode the seller who ANSWERED), record
+ * the call (answered/missed/duration — regardless of outcome), and privately
+ * notify the assigned seller. Idempotent by ringcentral_call_id.
  */
-export async function processInboundCall(call: InboundCall): Promise<CallResult> {
+export async function processInboundCall(call: InboundCall, opts: ProcessCallOpts = {}): Promise<CallResult> {
   const from = normalizeE164(call.from);
   if (!isValidE164(from)) {
     return { status: 'rejected', reason: 'invalid_from_phone' };
@@ -115,37 +123,55 @@ export async function processInboundCall(call: InboundCall): Promise<CallResult>
   }
 
   const result = normalizeCallResult(call.result);
+  const mode = opts.assignMode ?? config.callAssignMode;
 
   const tx = await prisma.$transaction(async (t) => {
     let contact = await t.contact.findUnique({
       where: { phoneE164_lineId: { phoneE164: from, lineId: line.id } },
     });
     let isNewContact = false;
-    let sellerId: string;
-    let sellerName: string;
+    let sellerId: string | null;
+    let sellerName: string | undefined;
+
+    // Picks the owner for an ownerless contact. In 'answered' (queue) mode the
+    // queue already distributed the call — the seller who ANSWERED becomes the
+    // owner; a missed call leaves the contact unassigned (the queue re-rotates
+    // next time). In 'roundrobin' mode the app assigns the next seller itself.
+    const pickSeller = async (): Promise<{ id: string; name: string } | null> => {
+      if (mode === 'answered') {
+        if (!opts.answeredSellerId) return null;
+        const s = await t.seller.findUnique({ where: { id: opts.answeredSellerId } });
+        return s ? { id: s.id, name: s.name } : null;
+      }
+      return assignNextSeller(t, line.id);
+    };
 
     if (!contact) {
       isNewContact = true;
-      const seller = await assignNextSeller(t, line.id);
-      sellerId = seller.id;
-      sellerName = seller.name;
+      const seller = await pickSeller();
+      sellerId = seller?.id ?? null;
+      sellerName = seller?.name;
       contact = await t.contact.create({
         data: { phoneE164: from, lineId: line.id, assignedSellerId: sellerId, status: 'active', firstMessageAt: new Date(), lastMessageAt: new Date() },
       });
-      logger.info(Decision.NEW_CLIENT_CREATED, { via: 'call', contactId: contact.id, phone: from, lineId: line.id, sellerId });
+      logger.info(Decision.NEW_CLIENT_CREATED, { via: 'call', contactId: contact.id, phone: from, lineId: line.id, sellerId, mode });
       await writeAudit(
-        { actorType: 'system', action: Decision.NEW_CLIENT_CREATED, entityType: 'contact', entityId: contact.id, details: { via: 'call', phone: from, lineId: line.id, sellerId } },
+        { actorType: 'system', action: Decision.NEW_CLIENT_CREATED, entityType: 'contact', entityId: contact.id, details: { via: 'call', phone: from, lineId: line.id, sellerId, mode } },
         t,
       );
     } else {
       if (!contact.assignedSellerId) {
-        const seller = await assignNextSeller(t, line.id);
-        contact = await t.contact.update({ where: { id: contact.id }, data: { assignedSellerId: seller.id } });
+        const seller = await pickSeller();
+        if (seller) {
+          contact = await t.contact.update({ where: { id: contact.id }, data: { assignedSellerId: seller.id } });
+        }
       }
-      sellerId = contact.assignedSellerId!;
-      const seller = await t.seller.findUnique({ where: { id: sellerId } });
-      sellerName = seller?.name ?? 'seller';
-      logger.info(Decision.EXISTING_SELLER_REUSED, { via: 'call', contactId: contact.id, phone: from, lineId: line.id, sellerId });
+      sellerId = contact.assignedSellerId ?? null;
+      if (sellerId) {
+        const seller = await t.seller.findUnique({ where: { id: sellerId } });
+        sellerName = seller?.name ?? 'seller';
+        logger.info(Decision.EXISTING_SELLER_REUSED, { via: 'call', contactId: contact.id, phone: from, lineId: line.id, sellerId });
+      }
       await t.contact.update({ where: { id: contact.id }, data: { lastMessageAt: new Date() } });
     }
 
@@ -167,32 +193,35 @@ export async function processInboundCall(call: InboundCall): Promise<CallResult>
     return { contact, callRow, sellerId, sellerName, isNewContact };
   });
 
-  // Notify the assigned seller privately.
-  const seller = await prisma.seller.findUnique({ where: { id: tx.sellerId } });
+  // Notify the assigned seller privately (queue mode may leave a missed call
+  // from a brand-new caller unowned — nothing to notify then).
   let notified = false;
-  if (seller?.telegramUserId) {
-    const text = formatCallNotification(from, result, call.durationSec, { name: line.name, phone: line.phoneE164 });
-    const topicId = await getSellerLineTopic(tx.sellerId, line.id);
-    const sent = await sendTelegramMessage(seller.telegramUserId, text, { messageThreadId: topicId ?? undefined });
-    if (sent.ok && sent.messageId) {
-      notified = true;
-      await prisma.call.update({
-        where: { id: tx.callRow.id },
-        data: { telegramMessageId: sent.messageId, telegramChatId: sent.chatId },
-      });
-      logger.info(Decision.TELEGRAM_NOTIFIED, { via: 'call', sellerId: tx.sellerId, callId: tx.callRow.id });
+  if (tx.sellerId) {
+    const seller = await prisma.seller.findUnique({ where: { id: tx.sellerId } });
+    if (seller?.telegramUserId) {
+      const text = formatCallNotification(from, result, call.durationSec, { name: line.name, phone: line.phoneE164 });
+      const topicId = await getSellerLineTopic(tx.sellerId, line.id);
+      const sent = await sendTelegramMessage(seller.telegramUserId, text, { messageThreadId: topicId ?? undefined });
+      if (sent.ok && sent.messageId) {
+        notified = true;
+        await prisma.call.update({
+          where: { id: tx.callRow.id },
+          data: { telegramMessageId: sent.messageId, telegramChatId: sent.chatId },
+        });
+        logger.info(Decision.TELEGRAM_NOTIFIED, { via: 'call', sellerId: tx.sellerId, callId: tx.callRow.id });
+      } else {
+        logger.error('telegram_notify_failed', { via: 'call', sellerId: tx.sellerId, error: sent.error });
+      }
     } else {
-      logger.error('telegram_notify_failed', { via: 'call', sellerId: tx.sellerId, error: sent.error });
+      logger.warn('seller_has_no_telegram', { sellerId: tx.sellerId });
     }
-  } else {
-    logger.warn('seller_has_no_telegram', { sellerId: tx.sellerId });
   }
 
   return {
     status: 'processed',
     callId: tx.callRow.id,
     lineId: line.id,
-    sellerId: tx.sellerId,
+    sellerId: tx.sellerId ?? undefined,
     sellerName: tx.sellerName,
     result,
     isNewContact: tx.isNewContact,

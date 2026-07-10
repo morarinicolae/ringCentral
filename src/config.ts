@@ -33,6 +33,14 @@ export const config = {
   testMode: bool(process.env.TEST_MODE, true),
   allowRealSms: bool(process.env.ALLOW_REAL_SMS, false),
 
+  // How a NEW caller gets their seller:
+  //  - 'roundrobin' (default): the app assigns the next seller in rotation.
+  //  - 'answered' (queue mode): the RingCentral Call Queue distributes the
+  //    call; whoever ANSWERS becomes the owner. The app then writes a custom
+  //    answering rule on the queue so this caller's future calls go DIRECTLY
+  //    to that seller's extension (native sticky).
+  callAssignMode: (process.env.CALL_ASSIGN_MODE ?? 'roundrobin').trim().toLowerCase() === 'answered' ? ('answered' as const) : ('roundrobin' as const),
+
   ringcentral: {
     clientId: process.env.RINGCENTRAL_CLIENT_ID ?? '',
     clientSecret: process.env.RINGCENTRAL_CLIENT_SECRET ?? '',
@@ -51,6 +59,10 @@ export const config = {
     // /sms endpoint. Separate flag — on this account inbound is A2P but the A2P
     // SEND endpoint 404s, while the classic send works and delivers.
     sendA2p: ['1', 'true', 'yes', 'on'].includes((process.env.RINGCENTRAL_SEND_A2P ?? '').trim().toLowerCase()),
+    // Queue mode: the extension ID of the Call Queue that owns the company
+    // number. Used to write per-client custom answering rules (native sticky)
+    // and to ignore the queue's own leg when detecting who answered.
+    queueExtensionId: (process.env.RINGCENTRAL_QUEUE_EXT_ID ?? '').trim(),
   },
 
   telegram: {
