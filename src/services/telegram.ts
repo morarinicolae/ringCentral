@@ -99,18 +99,40 @@ export function parseTelegramUpdate(update: any): ParsedTelegramMessage | null {
   };
 }
 
+/** The company line a message/call arrived on — shown so a seller who serves
+ * more than one number knows which one the client contacted. */
+export interface LineInfo {
+  name?: string;
+  phone?: string;
+}
+
+/** Renders a "Line: <name> (<number>)" header, or '' when no line info given. */
+function lineHeader(line?: LineInfo): string[] {
+  if (!line?.phone && !line?.name) return [];
+  const label = line.name && line.phone ? `${line.name} (${line.phone})` : line.name ?? line.phone ?? '';
+  return [`Line: ${label}`];
+}
+
 /** Format the inbound-client notification a seller receives. */
-export function formatInboundNotification(clientPhone: string, body: string): string {
-  return ['New SMS assigned to you', '', `Client: ${clientPhone}`, 'Message:', `“${body}”`, '', 'To reply, reply directly to this Telegram message.'].join(
-    '\n',
-  );
+export function formatInboundNotification(clientPhone: string, body: string, line?: LineInfo): string {
+  return [
+    'New SMS assigned to you',
+    '',
+    ...lineHeader(line),
+    `Client: ${clientPhone}`,
+    'Message:',
+    `“${body}”`,
+    '',
+    'To reply, reply directly to this Telegram message.',
+  ].join('\n');
 }
 
 /** Format the notification when an inbound message is an opt-out (STOP etc.). */
-export function formatOptOutNotification(clientPhone: string, body: string): string {
+export function formatOptOutNotification(clientPhone: string, body: string, line?: LineInfo): string {
   return [
     '⚠️ Client opted out',
     '',
+    ...lineHeader(line),
     `Client: ${clientPhone}`,
     'Message:',
     `“${body}”`,
@@ -120,7 +142,7 @@ export function formatOptOutNotification(clientPhone: string, body: string): str
 }
 
 /** Format the inbound-call notification a seller receives. */
-export function formatCallNotification(clientPhone: string, result: string, durationSec?: number): string {
+export function formatCallNotification(clientPhone: string, result: string, durationSec?: number, line?: LineInfo): string {
   const icon = result === 'missed' ? '📵' : result === 'voicemail' ? '📩' : '📞';
   const label =
     result === 'missed'
@@ -131,5 +153,5 @@ export function formatCallNotification(clientPhone: string, result: string, dura
           ? 'Voicemail'
           : 'Call';
   const dur = durationSec != null ? ` (${durationSec}s)` : '';
-  return [`${icon} ${label}${dur}`, '', `Client: ${clientPhone}`, '', 'This caller is assigned to you.'].join('\n');
+  return [`${icon} ${label}${dur}`, '', ...lineHeader(line), `Client: ${clientPhone}`, '', 'This caller is assigned to you.'].join('\n');
 }

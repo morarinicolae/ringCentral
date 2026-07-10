@@ -151,7 +151,8 @@ export async function processInboundSms(inbound: InboundSms): Promise<InboundRes
   if (!seller?.telegramUserId) {
     logger.warn('seller_has_no_telegram', { sellerId: tx.sellerId });
   } else {
-    const text = optedOut ? formatOptOutNotification(from, body) : formatInboundNotification(from, body);
+    const lineInfo = { name: line.name, phone: line.phoneE164 };
+    const text = optedOut ? formatOptOutNotification(from, body, lineInfo) : formatInboundNotification(from, body, lineInfo);
     const sent = await sendTelegramMessage(seller.telegramUserId, text);
     if (sent.ok && sent.messageId) {
       notified = true;

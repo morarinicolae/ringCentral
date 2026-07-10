@@ -122,7 +122,7 @@ export async function processInboundCall(call: InboundCall): Promise<CallResult>
   const seller = await prisma.seller.findUnique({ where: { id: tx.sellerId } });
   let notified = false;
   if (seller?.telegramUserId) {
-    const text = formatCallNotification(from, result, call.durationSec);
+    const text = formatCallNotification(from, result, call.durationSec, { name: line.name, phone: line.phoneE164 });
     const sent = await sendTelegramMessage(seller.telegramUserId, text);
     if (sent.ok && sent.messageId) {
       notified = true;
