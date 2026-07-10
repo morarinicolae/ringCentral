@@ -138,6 +138,29 @@ export async function getAccessToken(): Promise<string> {
   return getAccessTokenFor(globalRcConfig());
 }
 
+// Account phone-number list cache: maps an extension NUMBER (e.g. "567") to one
+// of its direct numbers — needed by RingOut, which only accepts real numbers.
+let numListCache: { at: number; records: any[] } | null = null;
+export async function getExtensionDirectNumber(extNumber: string, rc: RcConfig = globalRcConfig()): Promise<string | null> {
+  try {
+    if (!numListCache || Date.now() - numListCache.at > 600_000) {
+      const token = await getAccessTokenFor(rc);
+      const r = await fetch(`${rc.serverUrl}/restapi/v1.0/account/~/phone-number?perPage=1000`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const j: any = await r.json().catch(() => ({}));
+      if (!r.ok) return null;
+      numListCache = { at: Date.now(), records: j.records ?? [] };
+    }
+    const hit = numListCache.records.find(
+      (n) => n?.usageType === 'DirectNumber' && n?.extension?.extensionNumber === extNumber,
+    );
+    return hit?.phoneNumber ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // The JWT user's own extension = the DISPATCHER extension calls land on before
 // the app forwards them. Cached for an hour.
 let ownExt: { id: string; at: number } | null = null;

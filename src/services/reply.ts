@@ -9,7 +9,7 @@ import {
   MSG_UNKNOWN_CONTEXT,
 } from '../constants';
 import { ParsedTelegramMessage, sendTelegramMessage } from './telegram';
-import { sendSms, rcConfigForLine } from './ringcentral';
+import { sendSms, rcConfigForLine, getExtensionDirectNumber } from './ringcentral';
 import { ringOut } from './call-control';
 import { writeAudit } from './audit';
 
@@ -268,15 +268,26 @@ async function handleCallCommand(
     return say('Nu ai un număr de mobil setat în panou (coloana „Mobil"), așa că nu te pot suna ca să te conectez.', 'failed');
   }
 
+  // RingOut needs a REAL number to ring the seller on. If the seller is stored
+  // as a bare extension ("567"), resolve one of that extension's direct numbers.
+  let sellerNumber = seller.phoneE164;
+  if (/^\d{1,6}$/.test(sellerNumber)) {
+    const did = await getExtensionDirectNumber(sellerNumber);
+    if (!did) {
+      return say(`Extensia ta (${sellerNumber}) nu are un număr direct — nu te pot suna pentru conectare.`, 'failed');
+    }
+    sellerNumber = did;
+  }
+
   const line = await prisma.line.findUnique({ where: { id: contact.lineId } });
   const callerId = line?.phoneE164 ?? config.ringcentral.fromNumber;
 
   if (config.testMode && !config.allowRealSms) {
     logger.info('callback_test_mode', { sellerId: seller.id, to: contact.phoneE164, callerId });
-    return say(`TEST MODE: te-aș suna pe ${seller.phoneE164} și aș conecta clientul ${contact.phoneE164} (el ar vedea ${callerId}).`, 'test_sent');
+    return say(`TEST MODE: te-aș suna pe ${sellerNumber} și aș conecta clientul ${contact.phoneE164} (el ar vedea ${callerId}).`, 'test_sent');
   }
 
-  const res = await ringOut(rcConfigForLine(line), { from: seller.phoneE164, to: contact.phoneE164, callerId });
+  const res = await ringOut(rcConfigForLine(line), { from: sellerNumber, to: contact.phoneE164, callerId });
   await writeAudit({
     actorType: 'seller',
     actorId: seller.id,
