@@ -138,6 +138,25 @@ export async function getAccessToken(): Promise<string> {
   return getAccessTokenFor(globalRcConfig());
 }
 
+// The JWT user's own extension = the DISPATCHER extension calls land on before
+// the app forwards them. Cached for an hour.
+let ownExt: { id: string; at: number } | null = null;
+export async function getOwnExtensionId(rc: RcConfig = globalRcConfig()): Promise<string | null> {
+  if (ownExt && Date.now() - ownExt.at < 3_600_000) return ownExt.id;
+  try {
+    const token = await getAccessTokenFor(rc);
+    const r = await fetch(`${rc.serverUrl}/restapi/v1.0/account/~/extension/~`, { headers: { Authorization: `Bearer ${token}` } });
+    const j: any = await r.json().catch(() => ({}));
+    if (r.ok && j.id) {
+      ownExt = { id: String(j.id), at: Date.now() };
+      return ownExt.id;
+    }
+  } catch {
+    /* transient */
+  }
+  return null;
+}
+
 /** For tests: drop any cached token. */
 export function _resetRingCentralToken(): void {
   tokenCache.clear();

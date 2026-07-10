@@ -1,9 +1,10 @@
 import { Router } from 'express';
 import { prisma } from '../db';
+import { config } from '../config';
 import { logger } from '../logger';
 import { getOrAssignSellerForCall } from '../services/calls';
 import { forwardCall } from '../services/call-control';
-import { rcConfigForLine } from '../services/ringcentral';
+import { rcConfigForLine, getOwnExtensionId } from '../services/ringcentral';
 import { sendTelegramMessage } from '../services/telegram';
 import { getSellerLineTopic } from '../services/routing';
 
@@ -66,15 +67,20 @@ telephonyRouter.post('/', async (req, res) => {
 
     let state = sessions.get(sessionId);
 
-    // Claim the session if a ringing party targets one of OUR lines. The
-    // account-wide subscription sees EVERY company call; getOrAssignSellerForCall
-    // only matches explicitly configured lines and ignores the rest.
+    // Claim the session if a ringing party targets one of OUR lines, OR if the
+    // party is ringing on the DISPATCHER extension itself (an IVR "connect to
+    // extension" hop can rewrite the `to` number, but a call landing on the
+    // dispatcher is ours by definition — that extension exists only to route).
     if (!state) {
+      const dispatcherExtId = await getOwnExtensionId();
       for (const p of ringing) {
         const from: string | undefined = p.from?.phoneNumber;
         const to: string | undefined = p.to?.phoneNumber;
-        if (!from || !to) continue;
-        const owner = await getOrAssignSellerForCall(from, to);
+        if (!from) continue;
+        let owner = to ? await getOrAssignSellerForCall(from, to) : null;
+        if (!owner && dispatcherExtId && String(p.extensionId ?? '') === dispatcherExtId) {
+          owner = await getOrAssignSellerForCall(from, config.ringcentral.fromNumber);
+        }
         if (!owner) continue;
 
         state = {
