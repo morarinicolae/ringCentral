@@ -16,7 +16,10 @@ export interface RcConfig {
   extension: string;
   password: string;
   serverUrl: string;
+  /** Inbound SMS live in the A2P message list (TCR/10DLC) vs classic store. */
   useA2p: boolean;
+  /** Send via the A2P endpoint (default false — classic /sms works broadly). */
+  sendA2p: boolean;
   fromNumber: string;
 }
 
@@ -32,6 +35,7 @@ export function globalRcConfig(): RcConfig {
     password: r.password,
     serverUrl: r.serverUrl,
     useA2p: r.useA2p,
+    sendA2p: r.sendA2p,
     fromNumber: r.fromNumber,
   };
 }
@@ -67,6 +71,7 @@ export function rcConfigForLine(line: LineRc | null | undefined): RcConfig {
     password: '',
     serverUrl: line.rcServerUrl || g.serverUrl,
     useA2p: line.rcUseA2p ?? g.useA2p,
+    sendA2p: g.sendA2p,
     fromNumber: line.phoneE164,
   };
 }
@@ -154,10 +159,10 @@ async function postSmsOnce(rc: RcConfig, from: string, to: string, text: string)
     const token = await getAccessTokenFor(rc);
     // A2P High Volume SMS (for TCR/10DLC-registered accounts) uses a different
     // endpoint and body shape (to is an array of plain E.164 strings).
-    const url = rc.useA2p
+    const url = rc.sendA2p
       ? `${rc.serverUrl}/restapi/v1.0/account/~/a2p-sms/messages`
       : `${rc.serverUrl}/restapi/v1.0/account/~/extension/~/sms`;
-    const body = rc.useA2p
+    const body = rc.sendA2p
       ? { from, to: [to], text }
       : { from: { phoneNumber: from }, to: [{ phoneNumber: to }], text };
     const res = await fetch(url, {

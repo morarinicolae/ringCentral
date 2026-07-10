@@ -44,9 +44,13 @@ export const config = {
     // Optional JWT (RingCentral is deprecating password grant). If set, JWT
     // bearer flow is used instead of password grant.
     jwt: process.env.RINGCENTRAL_JWT ?? '',
-    // Send via the A2P High Volume SMS API (required for TCR/10DLC-registered
-    // accounts) instead of the classic per-extension /sms endpoint.
+    // INBOUND: poll the A2P High Volume message list (TCR/10DLC accounts get
+    // their incoming SMS there, not in the classic message store).
     useA2p: ['1', 'true', 'yes', 'on'].includes((process.env.RINGCENTRAL_USE_A2P ?? '').trim().toLowerCase()),
+    // OUTBOUND: send via the A2P endpoint instead of the classic per-extension
+    // /sms endpoint. Separate flag — on this account inbound is A2P but the A2P
+    // SEND endpoint 404s, while the classic send works and delivers.
+    sendA2p: ['1', 'true', 'yes', 'on'].includes((process.env.RINGCENTRAL_SEND_A2P ?? '').trim().toLowerCase()),
   },
 
   telegram: {
