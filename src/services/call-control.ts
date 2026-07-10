@@ -9,29 +9,37 @@ import { logger } from '../logger';
  * (rings them while the caller waits). No audio passes through this server.
  */
 
-/** Forward a still-ringing inbound party to an external phone number. */
+/**
+ * Forward a still-ringing inbound party to the seller's phone. The target can
+ * be a full number ("+1773...") or a bare EXTENSION ("567") — extensions are
+ * forwarded internally via extensionNumber, which rings all of that
+ * extension's devices/apps.
+ */
 export async function forwardCall(
   rc: RcConfig,
   sessionId: string,
   partyId: string,
-  phoneNumber: string,
+  target: string,
 ): Promise<{ ok: boolean; status?: number; raw?: unknown }> {
   try {
     const token = await getAccessTokenFor(rc);
+    const body = /^\d{1,6}$/.test(target.trim())
+      ? { extensionNumber: target.trim() }
+      : { phoneNumber: target.trim() };
     const res = await fetch(
       `${rc.serverUrl}/restapi/v1.0/account/~/telephony/sessions/${sessionId}/parties/${partyId}/forward`,
       {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ phoneNumber }),
+        body: JSON.stringify(body),
       },
     );
     const raw = await res.json().catch(() => ({}));
     if (!res.ok) {
-      logger.error('call_forward_failed', { sessionId, partyId, to: phoneNumber, status: res.status, raw });
+      logger.error('call_forward_failed', { sessionId, partyId, to: target, status: res.status, raw });
       return { ok: false, status: res.status, raw };
     }
-    logger.info('call_forwarded', { sessionId, partyId, to: phoneNumber });
+    logger.info('call_forwarded', { sessionId, partyId, to: target });
     return { ok: true, raw };
   } catch (err) {
     logger.error('call_forward_error', { sessionId, partyId, error: err instanceof Error ? err.message : String(err) });
