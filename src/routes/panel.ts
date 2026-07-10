@@ -144,7 +144,8 @@ function renderSellers(rows) {
   };
   $('#sellerTable tbody').innerHTML = rows.map(s =>
     '<tr><td>'+esc(s.name)+'</td><td>'+numbers(s)+'</td>'
-    + '<td><code>'+esc(s.telegramUserId||'—')+'</code></td>'
+    + '<td class="row"><input id="tg_'+s.id+'" value="'+esc(s.telegramUserId||'')+'" placeholder="ID / grup -100…" style="width:160px" />'
+    + '<button class="ghost" onclick="saveTg(\\''+s.id+'\\')">💾</button></td>'
     + '<td><span class="pill '+(s.isActive?'active':'inactive')+'">'+(s.isActive?'activ':'inactiv')+'</span></td>'
     + '<td><button class="ghost" onclick="toggle(\\''+s.id+'\\','+(!s.isActive)+')">'+(s.isActive?'Dezactivează':'Activează')+'</button></td></tr>').join('')
     || '<tr><td colspan="5" class="muted">Niciun vânzător.</td></tr>';
@@ -194,6 +195,11 @@ async function addSellerLine() {
   catch(e){ setStatus(e.message,'err'); }
 }
 async function toggle(id, active) { try { await api('/admin/sellers/'+id,{method:'PATCH',body:JSON.stringify({is_active:active})}); loadAll(); } catch(e){ setStatus(e.message,'err'); } }
+async function saveTg(id) {
+  const v=$('#tg_'+id).value.trim();
+  try { await api('/admin/sellers/'+id,{method:'PATCH',body:JSON.stringify({telegram_user_id:v||null})}); setStatus('Telegram ID salvat.','ok'); loadAll(); }
+  catch(e){ setStatus(e.message,'err'); }
+}
 async function reassign(convId) {
   const newId=$('#rs_'+convId).value;
   try { await api('/admin/reassign-conversation',{method:'POST',body:JSON.stringify({conversation_id:convId,new_seller_id:newId})}); setStatus('Reasignat.','ok'); loadAll(); }
