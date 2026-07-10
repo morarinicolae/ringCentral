@@ -401,20 +401,33 @@ adminRouter.post('/telephony/subscribe', async (req, res) => {
     res.status(400).json({ error: 'webhook_url_required', message: 'Provide an HTTPS webhook_url (or set APP_BASE_URL).' });
     return;
   }
-  const result = await createTelephonySubscription(webhookUrl);
-  res.status(result.ok ? 201 : 502).json({ ok: result.ok, webhook_url: webhookUrl, subscription: result.raw });
+  try {
+    const result = await createTelephonySubscription(webhookUrl);
+    res.status(result.ok ? 201 : 502).json({ ok: result.ok, webhook_url: webhookUrl, subscription: result.raw });
+  } catch (e) {
+    // e.g. RingCentral auth failure — report it instead of crashing the process.
+    res.status(502).json({ ok: false, error: 'subscribe_failed', detail: e instanceof Error ? e.message : String(e) });
+  }
 });
 
 /** GET /admin/telephony/subscriptions — list active RingCentral subscriptions. */
 adminRouter.get('/telephony/subscriptions', async (_req, res) => {
-  const subs = await listSubscriptions();
-  res.json(subs);
+  try {
+    const subs = await listSubscriptions();
+    res.json(subs);
+  } catch (e) {
+    res.status(502).json({ ok: false, error: 'list_failed', detail: e instanceof Error ? e.message : String(e) });
+  }
 });
 
 /** DELETE /admin/telephony/subscriptions/:id — remove a subscription. */
 adminRouter.delete('/telephony/subscriptions/:id', async (req, res) => {
-  const ok = await deleteSubscription(req.params.id);
-  res.status(ok ? 200 : 502).json({ ok });
+  try {
+    const ok = await deleteSubscription(req.params.id);
+    res.status(ok ? 200 : 502).json({ ok });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: 'delete_failed', detail: e instanceof Error ? e.message : String(e) });
+  }
 });
 
 /**
