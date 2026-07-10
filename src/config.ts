@@ -2,8 +2,11 @@ import dotenv from 'dotenv';
 
 // In tests, rely only on the controlled env from vitest.config so a developer's
 // local .env (real credentials, A2P flags, etc.) can never leak into the suite.
+// override:true so .env ALWAYS wins over a stale process env — pm2 caches the
+// environment from the first `pm2 start`, so a plain restart would otherwise keep
+// old RINGCENTRAL_* values and never pick up an edited .env.
 if (process.env.NODE_ENV !== 'test') {
-  dotenv.config();
+  dotenv.config({ override: true });
 }
 
 function bool(value: string | undefined, fallback = false): boolean {
