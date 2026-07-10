@@ -76,13 +76,14 @@ const HTML = /* html */ `<!doctype html>
   <section>
     <h2>Vânzători</h2>
     <table id="sellerTable"><thead>
-      <tr><th>Nume</th><th>Numere &amp; topic-uri</th><th>Telegram ID (grup/chat)</th><th>Activ</th><th></th></tr>
+      <tr><th>Nume</th><th>Numere &amp; topic-uri</th><th>Telegram ID (grup/chat)</th><th>Mobil (transfer apel)</th><th>Activ</th><th></th></tr>
     </thead><tbody></tbody></table>
     <div class="row" style="margin-top:12px">
-      <input id="nName" placeholder="Nume" style="width:130px" />
-      <input id="nTg" placeholder="Telegram ID / grup (-100…)" style="width:190px" />
+      <input id="nName" placeholder="Nume" style="width:110px" />
+      <input id="nTg" placeholder="Telegram ID / grup (-100…)" style="width:180px" />
+      <input id="nPhone" placeholder="Mobil +373… (apel)" style="width:150px" />
       <select id="nLine"></select>
-      <input id="nTopic" placeholder="Topic ID (opțional)" style="width:150px" />
+      <input id="nTopic" placeholder="Topic ID (opțional)" style="width:130px" />
       <button onclick="createSeller()">+ Adaugă vânzător</button>
     </div>
     <div class="muted" style="margin-top:14px; font-size:13px">
@@ -94,6 +95,19 @@ const HTML = /* html */ `<!doctype html>
       <input id="mTopic" placeholder="Topic ID" style="width:130px" />
       <button onclick="addSellerLine()">Pune pe număr / setează topic</button>
     </div>
+  </section>
+
+  <section>
+    <h2>Transfer apeluri live (RingCentral Call Control)</h2>
+    <div class="muted" style="font-size:13px; margin-bottom:8px">
+      Când un client sună, apelul se transferă live pe mobilul vânzătorului asignat. Necesită: webhook public (tunel) + permisiunea <code>CallControl</code> în app-ul RingCentral + mobilul fiecărui vânzător setat mai sus.
+    </div>
+    <div class="row">
+      <input id="whUrl" placeholder="https://<tunel>/webhooks/ringcentral/telephony" style="width:360px" />
+      <button onclick="subscribeTelephony()">Abonează webhook</button>
+      <button class="ghost" onclick="loadSubs()">↻ Vezi abonamente</button>
+    </div>
+    <div id="subs" class="muted" style="margin-top:10px; font-size:13px"></div>
   </section>
 
   <section>
@@ -161,11 +175,13 @@ function renderSellers(rows) {
   };
   $('#sellerTable tbody').innerHTML = rows.map(s =>
     '<tr><td>'+esc(s.name)+'</td><td>'+numbers(s)+'</td>'
-    + '<td class="row"><input id="tg_'+s.id+'" value="'+esc(s.telegramUserId||'')+'" placeholder="ID / grup -100…" style="width:160px" />'
+    + '<td class="row"><input id="tg_'+s.id+'" value="'+esc(s.telegramUserId||'')+'" placeholder="ID / grup -100…" style="width:150px" />'
     + '<button class="ghost" onclick="saveTg(\\''+s.id+'\\')">💾</button></td>'
+    + '<td class="row"><input id="ph_'+s.id+'" value="'+esc(s.phone_e164||'')+'" placeholder="+373…" style="width:120px" />'
+    + '<button class="ghost" onclick="savePhone(\\''+s.id+'\\')">💾</button></td>'
     + '<td><span class="pill '+(s.isActive?'active':'inactive')+'">'+(s.isActive?'activ':'inactiv')+'</span></td>'
     + '<td><button class="ghost" onclick="toggle(\\''+s.id+'\\','+(!s.isActive)+')">'+(s.isActive?'Dezactivează':'Activează')+'</button></td></tr>').join('')
-    || '<tr><td colspan="5" class="muted">Niciun vânzător.</td></tr>';
+    || '<tr><td colspan="6" class="muted">Niciun vânzător.</td></tr>';
   // membership form dropdowns
   $('#mSeller').innerHTML = rows.map(s=>'<option value="'+s.id+'">'+esc(s.name)+'</option>').join('');
   $('#mLine').innerHTML = LINES.map(l=>'<option value="'+l.id+'">'+esc(l.name)+'</option>').join('');
@@ -215,9 +231,32 @@ async function setLineRc() {
   catch(e){ setStatus(e.message,'err'); }
 }
 async function createSeller() {
-  const name=$('#nName').value.trim(), tg=$('#nTg').value.trim(), line_id=$('#nLine').value||undefined, telegram_topic_id=$('#nTopic').value.trim()||undefined;
+  const name=$('#nName').value.trim(), tg=$('#nTg').value.trim(), phone=$('#nPhone').value.trim()||undefined, line_id=$('#nLine').value||undefined, telegram_topic_id=$('#nTopic').value.trim()||undefined;
   if(!name){ setStatus('Numele e obligatoriu.','err'); return; }
-  try { await api('/admin/sellers',{method:'POST',body:JSON.stringify({name,telegram_user_id:tg||undefined,line_id,telegram_topic_id})}); $('#nName').value='';$('#nTg').value='';$('#nTopic').value=''; setStatus('Vânzător adăugat.','ok'); loadAll(); }
+  try { await api('/admin/sellers',{method:'POST',body:JSON.stringify({name,telegram_user_id:tg||undefined,phone_e164:phone,line_id,telegram_topic_id})}); $('#nName').value='';$('#nTg').value='';$('#nPhone').value='';$('#nTopic').value=''; setStatus('Vânzător adăugat.','ok'); loadAll(); }
+  catch(e){ setStatus(e.message,'err'); }
+}
+async function savePhone(id) {
+  const v=$('#ph_'+id).value.trim();
+  try { await api('/admin/sellers/'+id,{method:'PATCH',body:JSON.stringify({phone_e164:v||null})}); setStatus('Mobil salvat.','ok'); loadAll(); }
+  catch(e){ setStatus(e.message,'err'); }
+}
+async function subscribeTelephony() {
+  const webhook_url=$('#whUrl').value.trim()||undefined;
+  try { const r=await api('/admin/telephony/subscribe',{method:'POST',body:JSON.stringify({webhook_url})});
+    setStatus(r.ok?'Webhook abonat ✓':'Eroare abonare', r.ok?'ok':'err'); loadSubs(); }
+  catch(e){ setStatus(e.message,'err'); }
+}
+async function loadSubs() {
+  try { const r=await api('/admin/telephony/subscriptions');
+    const rows=(r.records||[]);
+    $('#subs').innerHTML = rows.length
+      ? rows.map(s=>'• <code>'+esc(s.id)+'</code> — '+esc((s.status||''))+' → '+esc((s.deliveryMode&&s.deliveryMode.address)||'?')+' <button class="ghost" onclick="delSub(\\''+s.id+'\\')">șterge</button>').join('<br>')
+      : 'Niciun abonament activ.';
+  } catch(e){ $('#subs').textContent=e.message; }
+}
+async function delSub(id) {
+  try { await api('/admin/telephony/subscriptions/'+id,{method:'DELETE'}); setStatus('Abonament șters.','ok'); loadSubs(); }
   catch(e){ setStatus(e.message,'err'); }
 }
 async function addSellerLine() {

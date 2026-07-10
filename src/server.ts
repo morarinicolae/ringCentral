@@ -6,6 +6,7 @@ import { testRouter } from './routes/test';
 import { adminRouter } from './routes/admin';
 import { sellerRouter } from './routes/seller';
 import { panelRouter } from './routes/panel';
+import { telephonyRouter } from './routes/telephony';
 
 export function createServer(): Express {
   const app = express();
@@ -22,6 +23,8 @@ export function createServer(): Express {
   });
 
   app.use('/webhooks', webhooksRouter);
+  // RingCentral Telephony Session webhook (live call transfer + validation handshake).
+  app.use('/webhooks/ringcentral/telephony', telephonyRouter);
   app.use('/admin', adminRouter);
   app.use('/seller', sellerRouter);
 

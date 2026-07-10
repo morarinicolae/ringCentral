@@ -59,6 +59,8 @@ model Seller {
   // Which line/team this seller belongs to (null = unassigned).
   lineId                 String?   @map("line_id")
   telegramUserId         String?   @unique @map("telegram_user_id")
+  // The seller's own phone (E.164) — where a LIVE inbound call is forwarded to.
+  phoneE164              String?   @map("phone_e164")
   ringcentralExtensionId String?   @map("ringcentral_extension_id")
   isActive               Boolean   @default(true) @map("is_active")
   priority               Int       @default(100)

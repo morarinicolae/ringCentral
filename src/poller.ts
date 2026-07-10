@@ -2,6 +2,7 @@ import { config } from './config';
 import { prisma } from './db';
 import { getAccessTokenFor, rcConfigForLine, rcAccountKey, RcConfig } from './services/ringcentral';
 import { processInboundCall } from './services/calls';
+import { ensureTelephonySubscription } from './services/call-control';
 import { logger } from './logger';
 
 /**
@@ -60,9 +61,19 @@ export async function pollTelegramOnce(): Promise<void> {
         body: JSON.stringify(u),
       });
     }
-  } catch {
-    /* transient — ignore */
+  } catch (e) {
+    logPollError('telegram_getupdates', e);
   }
+}
+
+// Surface poll failures (auth/permission/network) without spamming: at most one
+// line per source per 60s. Silent catches were hiding 401/403 from RingCentral.
+const lastErrLog = new Map<string, number>();
+function logPollError(where: string, detail: unknown, serverUrl?: string): void {
+  const now = Date.now();
+  if (now - (lastErrLog.get(where) ?? 0) < 60_000) return;
+  lastErrLog.set(where, now);
+  logger.warn('poll_error', { where, server: serverUrl, detail: detail instanceof Error ? detail.message : String(detail) });
 }
 
 async function postInboundSms(payload: unknown): Promise<void> {
@@ -87,6 +98,10 @@ export async function pollInboundSmsOnce(): Promise<void> {
           { headers: auth },
         );
         const j = (await r.json()) as any;
+        if (!r.ok) {
+          logPollError('a2p_inbound', `HTTP ${r.status}: ${JSON.stringify(j).slice(0, 200)}`, rc.serverUrl);
+          continue;
+        }
         for (const m of j.records || []) {
           if (!(m.to || []).some((t: string) => numbers.has(t))) continue;
           if (seenSms.has(m.id)) continue;
@@ -114,6 +129,10 @@ export async function pollInboundSmsOnce(): Promise<void> {
           { headers: auth },
         );
         const j = (await r.json()) as any;
+        if (!r.ok) {
+          logPollError('message_store_inbound', `HTTP ${r.status}: ${JSON.stringify(j).slice(0, 200)}`, rc.serverUrl);
+          continue;
+        }
         for (const m of j.records || []) {
           const tos = (m.to || []).map((x: any) => x.phoneNumber);
           if (!tos.some((t: string) => numbers.has(t))) continue;
@@ -134,8 +153,8 @@ export async function pollInboundSmsOnce(): Promise<void> {
           logger.info('poll_inbound_sms', { from: m.from?.phoneNumber, text: (m.subject || '').slice(0, 40) });
         }
       }
-    } catch {
-      /* transient — ignore */
+    } catch (e) {
+      logPollError('inbound_sms', e, rc.serverUrl);
     }
   }
 }
@@ -160,6 +179,10 @@ export async function pollCallsOnce(): Promise<void> {
         { headers: { Authorization: `Bearer ${token}` } },
       );
       const j = (await r.json()) as any;
+      if (!r.ok) {
+        logPollError('call_log', `HTTP ${r.status}: ${JSON.stringify(j).slice(0, 200)}`, rc.serverUrl);
+        continue;
+      }
       for (const c of j.records || []) {
         const to = c.to?.phoneNumber;
         const from = c.from?.phoneNumber;
@@ -178,8 +201,8 @@ export async function pollCallsOnce(): Promise<void> {
           logger.info('poll_inbound_call', { from, to, result: res.result, sellerId: res.sellerId });
         }
       }
-    } catch {
-      /* transient — ignore */
+    } catch (e) {
+      logPollError('call_log', e, rc.serverUrl);
     }
   }
 }
@@ -197,7 +220,19 @@ export async function startPolling(): Promise<void> {
       /* ignore */
     }
   }
-  logger.info('polling_started', { telegram: Boolean(config.telegram.botToken), sms: true, calls: true });
+  // Live call transfer: keep a telephony webhook subscription alive when a
+  // public base URL is configured (the tunnel). Self-heals every 6h.
+  const telephonyWebhook = config.appBaseUrl ? `${config.appBaseUrl.replace(/\/$/, '')}/webhooks/ringcentral/telephony` : '';
+  if (/^https:\/\//.test(telephonyWebhook)) {
+    ensureTelephonySubscription(telephonyWebhook)
+      .then((r) => logger.info('telephony_subscription_ensured', { ok: r.ok, created: r.created, id: r.id }))
+      .catch(() => {});
+    setInterval(() => {
+      ensureTelephonySubscription(telephonyWebhook).catch(() => {});
+    }, 6 * 3600 * 1000);
+  }
+
+  logger.info('polling_started', { telegram: Boolean(config.telegram.botToken), sms: true, calls: true, liveTransfer: Boolean(telephonyWebhook) });
   setInterval(pollTelegramOnce, 3000);
   setInterval(pollInboundSmsOnce, 8000);
   setInterval(pollCallsOnce, 15000);

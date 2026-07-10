@@ -40,6 +40,51 @@ export function normalizeCallResult(raw?: string): string {
 }
 
 /**
+ * Resolve the STICKY owner of a live inbound call WITHOUT recording it (the
+ * call-log poller records the final answered/missed outcome). Same rules as
+ * processInboundCall: a known caller keeps their seller; a new caller is
+ * round-robined and stuck. Returns the seller + their forward number.
+ */
+export async function getOrAssignSellerForCall(
+  fromRaw: string,
+  to: string,
+): Promise<{
+  line: { id: string; name: string; phoneE164: string };
+  seller: { id: string; name: string; telegramUserId: string | null; phoneE164: string | null };
+  isNewContact: boolean;
+} | null> {
+  const from = normalizeE164(fromRaw);
+  if (!isValidE164(from)) return null;
+  const line = await resolveLineByNumber(to);
+  if (!line) return null;
+
+  const { sellerId, isNew } = await prisma.$transaction(async (t) => {
+    const contact = await t.contact.findUnique({ where: { phoneE164_lineId: { phoneE164: from, lineId: line.id } } });
+    if (!contact) {
+      const s = await assignNextSeller(t, line.id);
+      await t.contact.create({
+        data: { phoneE164: from, lineId: line.id, assignedSellerId: s.id, status: 'active', firstMessageAt: new Date(), lastMessageAt: new Date() },
+      });
+      return { sellerId: s.id, isNew: true };
+    }
+    let sid = contact.assignedSellerId;
+    if (!sid) {
+      const s = await assignNextSeller(t, line.id);
+      sid = s.id;
+    }
+    await t.contact.update({ where: { id: contact.id }, data: { assignedSellerId: sid, lastMessageAt: new Date() } });
+    return { sellerId: sid, isNew: false };
+  });
+
+  const seller = await prisma.seller.findUnique({
+    where: { id: sellerId },
+    select: { id: true, name: true, telegramUserId: true, phoneE164: true },
+  });
+  if (!seller) return null;
+  return { line: { id: line.id, name: line.name, phoneE164: line.phoneE164 }, seller, isNewContact: isNew };
+}
+
+/**
  * Process one INBOUND call: resolve the line (from the number that was called),
  * find/create the per-line contact, assign a seller (same client -> same seller,
  * new client -> round-robin among the line's team), record the call in the DB

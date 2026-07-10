@@ -5,6 +5,8 @@ import { requireAdmin } from '../middleware/auth';
 import { writeAudit } from '../services/audit';
 import { logger } from '../logger';
 import { ringCentralDiagnostic } from '../services/ringcentral-connect';
+import { config } from '../config';
+import { createTelephonySubscription, listSubscriptions, deleteSubscription } from '../services/call-control';
 
 export const adminRouter = Router();
 adminRouter.use(requireAdmin);
@@ -217,6 +219,8 @@ adminRouter.post('/reassign-conversation', async (req, res) => {
 const CreateSellerSchema = z.object({
   name: z.string().min(1),
   telegram_user_id: z.string().min(1).optional(),
+  // The seller's mobile (E.164) — where a LIVE inbound call is forwarded.
+  phone_e164: z.string().min(3).optional(),
   ringcentral_extension_id: z.string().optional(),
   line_id: z.string().min(1).optional(),
   // Forum topic (message_thread_id) for this line inside the seller's group.
@@ -236,6 +240,7 @@ adminRouter.post('/sellers', async (req, res) => {
       data: {
         name: d.name,
         telegramUserId: d.telegram_user_id ?? null,
+        phoneE164: d.phone_e164 ?? null,
         ringcentralExtensionId: d.ringcentral_extension_id ?? null,
         lineId: d.line_id ?? null,
         isActive: d.is_active ?? true,
@@ -322,6 +327,7 @@ adminRouter.delete('/seller-lines', async (req, res) => {
 const UpdateSellerSchema = z.object({
   name: z.string().min(1).optional(),
   telegram_user_id: z.string().min(1).nullable().optional(),
+  phone_e164: z.string().min(3).nullable().optional(),
   ringcentral_extension_id: z.string().nullable().optional(),
   line_id: z.string().min(1).nullable().optional(),
   is_active: z.boolean().optional(),
@@ -344,6 +350,7 @@ adminRouter.patch('/sellers/:id', async (req, res) => {
     data: {
       ...(d.name !== undefined ? { name: d.name } : {}),
       ...(d.telegram_user_id !== undefined ? { telegramUserId: d.telegram_user_id } : {}),
+      ...(d.phone_e164 !== undefined ? { phoneE164: d.phone_e164 } : {}),
       ...(d.ringcentral_extension_id !== undefined ? { ringcentralExtensionId: d.ringcentral_extension_id } : {}),
       ...(d.line_id !== undefined ? { lineId: d.line_id } : {}),
       ...(d.is_active !== undefined ? { isActive: d.is_active } : {}),
@@ -366,6 +373,7 @@ adminRouter.get('/sellers', async (_req, res) => {
       id: s.id,
       name: s.name,
       telegramUserId: s.telegramUserId,
+      phone_e164: s.phoneE164,
       isActive: s.isActive,
       priority: s.priority,
       line: s.line ? { id: s.line.id, name: s.line.name, phone: s.line.phoneE164 } : null,
@@ -380,6 +388,33 @@ adminRouter.get('/sellers', async (_req, res) => {
       })),
     })),
   });
+});
+
+/**
+ * POST /admin/telephony/subscribe — register the RingCentral webhook that
+ * delivers live inbound-call events (for call transfer). Body: { webhook_url? }.
+ * Defaults to APP_BASE_URL + /webhooks/ringcentral/telephony.
+ */
+adminRouter.post('/telephony/subscribe', async (req, res) => {
+  const webhookUrl = (req.body?.webhook_url as string) || (config.appBaseUrl ? `${config.appBaseUrl.replace(/\/$/, '')}/webhooks/ringcentral/telephony` : '');
+  if (!webhookUrl || !/^https:\/\//.test(webhookUrl)) {
+    res.status(400).json({ error: 'webhook_url_required', message: 'Provide an HTTPS webhook_url (or set APP_BASE_URL).' });
+    return;
+  }
+  const result = await createTelephonySubscription(webhookUrl);
+  res.status(result.ok ? 201 : 502).json({ ok: result.ok, webhook_url: webhookUrl, subscription: result.raw });
+});
+
+/** GET /admin/telephony/subscriptions — list active RingCentral subscriptions. */
+adminRouter.get('/telephony/subscriptions', async (_req, res) => {
+  const subs = await listSubscriptions();
+  res.json(subs);
+});
+
+/** DELETE /admin/telephony/subscriptions/:id — remove a subscription. */
+adminRouter.delete('/telephony/subscriptions/:id', async (req, res) => {
+  const ok = await deleteSubscription(req.params.id);
+  res.status(ok ? 200 : 502).json({ ok });
 });
 
 /**
