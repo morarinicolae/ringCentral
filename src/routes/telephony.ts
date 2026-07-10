@@ -9,20 +9,41 @@ import { getSellerLineTopic } from '../services/routing';
 
 export const telephonyRouter = Router();
 
-// Dedupe: forward a session at most once (Setup -> Proceeding -> Answered fire
-// many events for the same call). Value = timestamp for cheap expiry.
-const handledSessions = new Map<string, number>();
+/**
+ * Per-session routing state. A call that enters through the Auto-Receptionist
+ * produces SEVERAL legs (parties) across events: the AA leg (not controllable —
+ * forwarding it returns TAS-106) and then the target-extension leg. We claim
+ * the session on the first ringing party that targets one of OUR lines, then
+ * keep attempting the forward on each new ringing leg until one succeeds.
+ */
+interface SessionState {
+  lineId: string;
+  lineName: string;
+  linePhone: string;
+  clientPhone: string;
+  seller: { id: string; name: string; telegramUserId: string | null; phoneE164: string | null };
+  forwarded: boolean;
+  notified: boolean;
+  tried: Set<string>;
+  ts: number;
+}
+const sessions = new Map<string, SessionState>();
+
+function gcSessions(): void {
+  if (sessions.size <= 500) return;
+  const cutoff = Date.now() - 3_600_000;
+  for (const [k, s] of sessions) if (s.ts < cutoff) sessions.delete(k);
+}
 
 /**
  * RingCentral Telephony Session webhook.
- *
- * 1. Subscription handshake: the first request carries a `Validation-Token`
- *    header that MUST be echoed back in the response header.
- * 2. Inbound call: on the first ringing party (status Setup/Proceeding), resolve
- *    the sticky seller and FORWARD the still-ringing call to their mobile.
+ * 1. Subscription handshake: echo the `Validation-Token` header.
+ * 2. Inbound call to one of OUR lines: resolve the sticky seller once, notify
+ *    Telegram once, and forward the ringing leg to the seller's phone —
+ *    retrying on each new leg (AA leg -> extension leg) until it succeeds.
+ * Calls to any other company number are ignored entirely.
  */
 telephonyRouter.post('/', async (req, res) => {
-  // (1) Endpoint-verification handshake.
   const validation = req.header('Validation-Token');
   if (validation) {
     res.set('Validation-Token', validation);
@@ -39,53 +60,74 @@ telephonyRouter.post('/', async (req, res) => {
     const parties: any[] = body.parties ?? [];
     if (!sessionId || parties.length === 0) return;
 
-    // The still-ringing inbound leg is the one we can forward.
-    const party = parties.find(
+    const ringing = parties.filter(
       (p) => p?.direction === 'Inbound' && (p?.status?.code === 'Setup' || p?.status?.code === 'Proceeding'),
     );
-    if (!party) return;
 
-    const from: string | undefined = party.from?.phoneNumber;
-    const to: string | undefined = party.to?.phoneNumber;
-    if (!from || !to) return;
+    let state = sessions.get(sessionId);
 
-    // The account-wide subscription delivers EVERY inbound call in the company.
-    // Only touch calls to numbers explicitly configured as lines — everything
-    // else belongs to other departments and must be ignored silently.
-    const line = await prisma.line.findFirst({ where: { isActive: true, phoneE164: to }, select: { id: true } });
-    if (!line) return;
+    // Claim the session if a ringing party targets one of OUR lines. The
+    // account-wide subscription sees EVERY company call; getOrAssignSellerForCall
+    // only matches explicitly configured lines and ignores the rest.
+    if (!state) {
+      for (const p of ringing) {
+        const from: string | undefined = p.from?.phoneNumber;
+        const to: string | undefined = p.to?.phoneNumber;
+        if (!from || !to) continue;
+        const owner = await getOrAssignSellerForCall(from, to);
+        if (!owner) continue;
 
-    if (handledSessions.has(sessionId)) return;
-    handledSessions.set(sessionId, Date.now());
-    if (handledSessions.size > 500) {
-      const cutoff = Date.now() - 3_600_000;
-      for (const [k, ts] of handledSessions) if (ts < cutoff) handledSessions.delete(k);
+        state = {
+          lineId: owner.line.id,
+          lineName: owner.line.name,
+          linePhone: owner.line.phoneE164,
+          clientPhone: from,
+          seller: owner.seller,
+          forwarded: false,
+          notified: false,
+          tried: new Set(),
+          ts: Date.now(),
+        };
+        sessions.set(sessionId, state);
+        gcSessions();
+        logger.info('live_call_routed', { from, to, sellerId: owner.seller.id, sellerName: owner.seller.name, isNew: owner.isNewContact });
+
+        if (!owner.seller.phoneE164) {
+          logger.warn('live_call_no_forward_number', { sellerId: owner.seller.id, sellerName: owner.seller.name });
+        }
+        if (owner.seller.telegramUserId) {
+          const topicId = await getSellerLineTopic(owner.seller.id, owner.line.id);
+          const note = owner.seller.phoneE164
+            ? `📞 Apel de la ${from} — ți-l transfer acum pe ${owner.seller.phoneE164}.`
+            : `📞 Apel de la ${from} pe linia ${owner.line.name} — clientul e al tău (nu ai număr de transfer setat).`;
+          await sendTelegramMessage(owner.seller.telegramUserId, note, { messageThreadId: topicId ?? undefined });
+          state.notified = true;
+        }
+        break;
+      }
+      if (!state) return; // not one of our lines — someone else's call, ignore
     }
 
-    // Sticky owner (existing caller -> same seller; new -> round-robin + stuck).
-    const owner = await getOrAssignSellerForCall(from, to);
-    if (!owner) {
-      logger.warn('live_call_unrouted', { from, to });
-      return;
-    }
-    logger.info('live_call_routed', { from, to, sellerId: owner.seller.id, sellerName: owner.seller.name, isNew: owner.isNewContact });
+    // Diagnostic trail for OUR sessions only: how each leg looks per event.
+    logger.info('telephony_session_event', {
+      sessionId,
+      parties: parties.map((p) => ({ id: p.id, dir: p.direction, status: p.status?.code, ext: p.extensionId, to: p.to?.phoneNumber, rcc: p.status?.rcc })),
+    });
 
-    // Forward the ringing call to the seller's mobile (latency-critical first).
-    if (owner.seller.phoneE164) {
-      const line = await prisma.line.findUnique({ where: { id: owner.line.id } });
+    // Forward: try every ringing leg we haven't tried yet, until one sticks.
+    if (!state.forwarded && state.seller.phoneE164) {
+      const line = await prisma.line.findUnique({ where: { id: state.lineId } });
       const rc = rcConfigForLine(line);
-      await forwardCall(rc, sessionId, party.id, owner.seller.phoneE164);
-    } else {
-      logger.warn('live_call_no_forward_number', { sellerId: owner.seller.id, sellerName: owner.seller.name });
-    }
-
-    // Notify the seller's Telegram (group/topic) that a call is coming in.
-    if (owner.seller.telegramUserId) {
-      const topicId = await getSellerLineTopic(owner.seller.id, owner.line.id);
-      const note = owner.seller.phoneE164
-        ? `📞 Apel de la ${from} — ți-l transfer acum pe ${owner.seller.phoneE164}.`
-        : `📞 Apel de la ${from} pe linia ${owner.line.name} — clientul e al tău (nu ai număr de transfer setat).`;
-      await sendTelegramMessage(owner.seller.telegramUserId, note, { messageThreadId: topicId ?? undefined });
+      for (const p of ringing) {
+        const pid: string | undefined = p.id;
+        if (!pid || state.tried.has(pid)) continue;
+        state.tried.add(pid);
+        const result = await forwardCall(rc, sessionId, pid, state.seller.phoneE164);
+        if (result.ok) {
+          state.forwarded = true;
+          break;
+        }
+      }
     }
   } catch (e) {
     logger.error('telephony_webhook_error', { error: e instanceof Error ? e.message : String(e) });
