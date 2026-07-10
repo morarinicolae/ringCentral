@@ -5,36 +5,110 @@ import { isValidE164 } from './phone';
 import { NON_SENDABLE_CONTACT_STATUSES } from '../constants';
 import { SendSmsResult } from '../types';
 
-// ---- RingCentral OAuth token (only used for REAL sends) -----------------
+// ---- RingCentral account resolution (per line) --------------------------
 
-let cachedToken: { accessToken: string; expiresAt: number } | null = null;
+/** A single RingCentral account/connection (credentials + the number to send from). */
+export interface RcConfig {
+  clientId: string;
+  clientSecret: string;
+  jwt: string;
+  username: string;
+  extension: string;
+  password: string;
+  serverUrl: string;
+  useA2p: boolean;
+  fromNumber: string;
+}
 
-export async function getAccessToken(): Promise<string> {
+/** The account configured via the global RINGCENTRAL_* env vars. */
+export function globalRcConfig(): RcConfig {
+  const r = config.ringcentral;
+  return {
+    clientId: r.clientId,
+    clientSecret: r.clientSecret,
+    jwt: r.jwt,
+    username: r.username,
+    extension: r.extension,
+    password: r.password,
+    serverUrl: r.serverUrl,
+    useA2p: r.useA2p,
+    fromNumber: r.fromNumber,
+  };
+}
+
+/** The subset of Line fields that carry a per-line RingCentral account. */
+export interface LineRc {
+  phoneE164: string;
+  rcClientId?: string | null;
+  rcClientSecret?: string | null;
+  rcJwt?: string | null;
+  rcServerUrl?: string | null;
+  rcUseA2p?: boolean | null;
+}
+
+/**
+ * The effective RingCentral account for a line: its OWN credentials when set,
+ * otherwise the global env account. Either way the send-from number is the
+ * line's own number.
+ */
+export function rcConfigForLine(line: LineRc | null | undefined): RcConfig {
+  const g = globalRcConfig();
+  if (!line) return g;
+  const hasOwn = Boolean(line.rcClientId && line.rcJwt);
+  if (!hasOwn) {
+    return { ...g, fromNumber: line.phoneE164 || g.fromNumber };
+  }
+  return {
+    clientId: line.rcClientId as string,
+    clientSecret: line.rcClientSecret ?? '',
+    jwt: line.rcJwt as string,
+    username: '',
+    extension: '',
+    password: '',
+    serverUrl: line.rcServerUrl || g.serverUrl,
+    useA2p: line.rcUseA2p ?? g.useA2p,
+    fromNumber: line.phoneE164,
+  };
+}
+
+/** Stable key so tokens are cached per distinct account. */
+export function rcAccountKey(rc: RcConfig): string {
+  return `${rc.serverUrl}|${rc.clientId}|${rc.jwt ? 'jwt' : `pw:${rc.username}`}`;
+}
+
+// ---- RingCentral OAuth token (per account) ------------------------------
+
+const tokenCache = new Map<string, { accessToken: string; expiresAt: number }>();
+
+/** Get (and cache) an access token for a SPECIFIC RingCentral account. */
+export async function getAccessTokenFor(rc: RcConfig): Promise<string> {
   const now = Date.now();
-  if (cachedToken && cachedToken.expiresAt > now + 60_000) {
-    return cachedToken.accessToken;
+  const key = rcAccountKey(rc);
+  const cached = tokenCache.get(key);
+  if (cached && cached.expiresAt > now + 60_000) {
+    return cached.accessToken;
   }
 
-  const basic = Buffer.from(`${config.ringcentral.clientId}:${config.ringcentral.clientSecret}`).toString('base64');
+  const basic = Buffer.from(`${rc.clientId}:${rc.clientSecret}`).toString('base64');
 
   let body: URLSearchParams;
-  if (config.ringcentral.jwt) {
+  if (rc.jwt) {
     // JWT bearer flow (recommended by RingCentral).
     body = new URLSearchParams({
       grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-      assertion: config.ringcentral.jwt,
+      assertion: rc.jwt,
     });
   } else {
     // Password (ROPC) flow, matching the provided env vars.
     body = new URLSearchParams({
       grant_type: 'password',
-      username: config.ringcentral.username,
-      extension: config.ringcentral.extension,
-      password: config.ringcentral.password,
+      username: rc.username,
+      extension: rc.extension,
+      password: rc.password,
     });
   }
 
-  const res = await fetch(`${config.ringcentral.serverUrl}/restapi/oauth/token`, {
+  const res = await fetch(`${rc.serverUrl}/restapi/oauth/token`, {
     method: 'POST',
     headers: {
       Authorization: `Basic ${basic}`,
@@ -47,16 +121,21 @@ export async function getAccessToken(): Promise<string> {
   if (!res.ok || !json.access_token) {
     throw new Error(`RingCentral auth failed: ${json.error_description ?? res.status}`);
   }
-  cachedToken = {
+  tokenCache.set(key, {
     accessToken: json.access_token,
     expiresAt: now + (json.expires_in ?? 3600) * 1000,
-  };
-  return cachedToken.accessToken;
+  });
+  return json.access_token;
+}
+
+/** Token for the global env account (used by diagnostics / single-account callers). */
+export async function getAccessToken(): Promise<string> {
+  return getAccessTokenFor(globalRcConfig());
 }
 
 /** For tests: drop any cached token. */
 export function _resetRingCentralToken(): void {
-  cachedToken = null;
+  tokenCache.clear();
 }
 
 // ---- Low-level SMS POST with bounded retry ------------------------------
@@ -70,15 +149,15 @@ interface RawSendOutcome {
   retryable: boolean;
 }
 
-async function postSmsOnce(from: string, to: string, text: string): Promise<RawSendOutcome> {
+async function postSmsOnce(rc: RcConfig, from: string, to: string, text: string): Promise<RawSendOutcome> {
   try {
-    const token = await getAccessToken();
+    const token = await getAccessTokenFor(rc);
     // A2P High Volume SMS (for TCR/10DLC-registered accounts) uses a different
     // endpoint and body shape (to is an array of plain E.164 strings).
-    const url = config.ringcentral.useA2p
-      ? `${config.ringcentral.serverUrl}/restapi/v1.0/account/~/a2p-sms/messages`
-      : `${config.ringcentral.serverUrl}/restapi/v1.0/account/~/extension/~/sms`;
-    const body = config.ringcentral.useA2p
+    const url = rc.useA2p
+      ? `${rc.serverUrl}/restapi/v1.0/account/~/a2p-sms/messages`
+      : `${rc.serverUrl}/restapi/v1.0/account/~/extension/~/sms`;
+    const body = rc.useA2p
       ? { from, to: [to], text }
       : { from: { phoneNumber: from }, to: [{ phoneNumber: to }], text };
     const res = await fetch(url, {
@@ -140,11 +219,14 @@ export async function sendSms(args: SendSmsArgs): Promise<SendSmsResult> {
 
   const conversation = await prisma.conversation.findUnique({
     where: { id: conversationId },
-    include: { contact: true },
+    include: { contact: true, line: true },
   });
   if (!conversation) {
     return fail('conversation_not_found', `Conversation ${conversationId} not found`);
   }
+  // Send from the line's OWN RingCentral account (each number can be a separate
+  // account); falls back to the global env account when the line has no creds.
+  const rc = rcConfigForLine(conversation.line);
   if (conversation.assignedSellerId !== sellerId) {
     return fail('ownership_conversation', 'Seller does not own this conversation');
   }
@@ -169,7 +251,7 @@ export async function sendSms(args: SendSmsArgs): Promise<SendSmsResult> {
   const maxAttempts = Math.max(1, config.smsMaxRetries);
   let last: RawSendOutcome | null = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    last = await postSmsOnce(from, to, text);
+    last = await postSmsOnce(rc, from, to, text);
     if (last.ok) {
       logger.info(Decision.OUTBOUND_SENT, { conversationId, sellerId, to, ringcentralMessageId: last.ringcentralMessageId });
       return { ok: true, status: 'sent', ringcentralMessageId: last.ringcentralMessageId, raw: last.raw };

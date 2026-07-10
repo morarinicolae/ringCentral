@@ -50,14 +50,26 @@ const HTML = /* html */ `<!doctype html>
   <div id="status" class="muted" style="margin-bottom:14px">Introdu admin token-ul și apasă „Salvează”.</div>
 
   <section>
-    <h2>Linii (număr + echipă)</h2>
+    <h2>Linii (număr + cont RingCentral + echipă)</h2>
     <table id="lineTable"><thead>
-      <tr><th>Nume</th><th>Număr</th><th>Activ</th><th>Selleri</th></tr>
+      <tr><th>Nume</th><th>Număr</th><th>Cont RC</th><th>Activ</th><th>Selleri</th></tr>
     </thead><tbody></tbody></table>
     <div class="row" style="margin-top:12px">
       <input id="lName" placeholder="Nume linie" style="width:150px" />
       <input id="lPhone" placeholder="+1XXXXXXXXXX" style="width:150px" />
       <button onclick="createLine()">+ Adaugă linie</button>
+    </div>
+    <div class="muted" style="margin-top:14px; font-size:13px">
+      <b>Cont RingCentral per număr</b> (fiecare linie își are contul ei — lasă gol ca să folosească contul global din <code>.env</code>):
+    </div>
+    <div class="row" style="margin-top:8px">
+      <select id="rcLine"></select>
+      <input id="rcClientId" placeholder="Client ID" style="width:150px" />
+      <input id="rcSecret" type="password" placeholder="Client Secret" style="width:150px" />
+      <input id="rcJwt" type="password" placeholder="JWT" style="width:150px" />
+      <input id="rcServer" placeholder="Server URL (opțional)" style="width:170px" />
+      <label class="muted" style="display:flex;gap:5px;align-items:center"><input id="rcA2p" type="checkbox" style="width:auto" /> A2P</label>
+      <button onclick="setLineRc()">Salvează cont RC</button>
     </div>
   </section>
 
@@ -128,13 +140,18 @@ async function loadAll() {
 }
 
 function renderLines(rows) {
+  const rc = (l) => l.rc_configured
+    ? '<span class="pill active">cont propriu'+(l.rc_use_a2p?' · A2P':'')+'</span>'
+    : '<span class="muted">global (.env)</span>';
   $('#lineTable tbody').innerHTML = rows.map(l =>
     '<tr><td>'+esc(l.name)+'</td><td><code>'+esc(l.phone)+'</code></td>'
+    + '<td>'+rc(l)+'</td>'
     + '<td><span class="pill '+(l.is_active?'active':'inactive')+'">'+(l.is_active?'activ':'inactiv')+'</span></td>'
     + '<td class="muted">'+ (l.sellers.map(s=>esc(s.name)).join(', ')||'—') +'</td></tr>').join('')
-    || '<tr><td colspan="4" class="muted">Nicio linie. Adaugă una mai jos.</td></tr>';
-  // seller-create line dropdown
+    || '<tr><td colspan="5" class="muted">Nicio linie. Adaugă una mai jos.</td></tr>';
+  // line dropdowns (seller-create + RC form)
   $('#nLine').innerHTML = '<option value="">(fără linie)</option>' + rows.map(l=>'<option value="'+l.id+'">'+esc(l.name)+'</option>').join('');
+  $('#rcLine').innerHTML = rows.map(l=>'<option value="'+l.id+'">'+esc(l.name)+' ('+esc(l.phone)+')</option>').join('');
 }
 function renderSellers(rows) {
   const numbers = (s) => {
@@ -180,6 +197,21 @@ async function createLine() {
   const name=$('#lName').value.trim(), phone=$('#lPhone').value.trim();
   if(!name||!phone){ setStatus('Nume + număr obligatorii.','err'); return; }
   try { await api('/admin/lines',{method:'POST',body:JSON.stringify({name,phone_e164:phone})}); $('#lName').value='';$('#lPhone').value=''; setStatus('Linie adăugată.','ok'); loadAll(); }
+  catch(e){ setStatus(e.message,'err'); }
+}
+async function setLineRc() {
+  const id=$('#rcLine').value;
+  if(!id){ setStatus('Alege o linie.','err'); return; }
+  const body={
+    rc_client_id:$('#rcClientId').value.trim()||null,
+    rc_client_secret:$('#rcSecret').value.trim()||null,
+    rc_jwt:$('#rcJwt').value.trim()||null,
+    rc_server_url:$('#rcServer').value.trim()||null,
+    rc_use_a2p:$('#rcA2p').checked,
+  };
+  try { await api('/admin/lines/'+id,{method:'PATCH',body:JSON.stringify(body)});
+    $('#rcClientId').value='';$('#rcSecret').value='';$('#rcJwt').value='';$('#rcServer').value='';$('#rcA2p').checked=false;
+    setStatus('Cont RC salvat pentru linie.','ok'); loadAll(); }
   catch(e){ setStatus(e.message,'err'); }
 }
 async function createSeller() {

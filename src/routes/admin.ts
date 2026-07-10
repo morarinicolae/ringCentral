@@ -74,17 +74,39 @@ adminRouter.get('/lines', async (_req, res) => {
       name: l.name,
       phone: l.phoneE164,
       is_active: l.isActive,
+      // RingCentral account status — never echo the secret/JWT back.
+      rc_configured: Boolean(l.rcClientId && l.rcJwt),
+      rc_server_url: l.rcServerUrl,
+      rc_use_a2p: l.rcUseA2p,
       sellers: l.sellers.map((s) => ({ id: s.id, name: s.name, is_active: s.isActive })),
     })),
   });
 });
 
-/** POST /admin/lines — create a line (a company number + its own team). */
+/** POST /admin/lines — create a line (a company number + its own RC account + team). */
+const RcFields = {
+  rc_client_id: z.string().nullable().optional(),
+  rc_client_secret: z.string().nullable().optional(),
+  rc_jwt: z.string().nullable().optional(),
+  rc_server_url: z.string().nullable().optional(),
+  rc_use_a2p: z.boolean().nullable().optional(),
+};
 const CreateLineSchema = z.object({
   phone_e164: z.string().min(3),
   name: z.string().min(1),
   is_active: z.boolean().optional(),
+  ...RcFields,
 });
+// Map snake_case RC fields to the Prisma columns (only those actually provided).
+function rcData(d: Record<string, unknown>) {
+  const out: Record<string, unknown> = {};
+  if (d.rc_client_id !== undefined) out.rcClientId = d.rc_client_id;
+  if (d.rc_client_secret !== undefined) out.rcClientSecret = d.rc_client_secret;
+  if (d.rc_jwt !== undefined) out.rcJwt = d.rc_jwt;
+  if (d.rc_server_url !== undefined) out.rcServerUrl = d.rc_server_url;
+  if (d.rc_use_a2p !== undefined) out.rcUseA2p = d.rc_use_a2p;
+  return out;
+}
 adminRouter.post('/lines', async (req, res) => {
   const parsed = CreateLineSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -94,11 +116,51 @@ adminRouter.post('/lines', async (req, res) => {
   const d = parsed.data;
   try {
     const line = await prisma.line.create({
-      data: { phoneE164: d.phone_e164, name: d.name, isActive: d.is_active ?? true },
+      data: { phoneE164: d.phone_e164, name: d.name, isActive: d.is_active ?? true, ...rcData(d) },
     });
     await prisma.routingState.create({ data: { lineId: line.id, mode: 'round_robin' } });
-    await writeAudit({ actorType: 'admin', action: 'line_created', entityType: 'line', entityId: line.id, details: { name: line.name, phone: line.phoneE164 } });
-    res.status(201).json({ ok: true, line });
+    await writeAudit({ actorType: 'admin', action: 'line_created', entityType: 'line', entityId: line.id, details: { name: line.name, phone: line.phoneE164, rc: Boolean(line.rcClientId) } });
+    res.status(201).json({ ok: true, line: { id: line.id, name: line.name, phone: line.phoneE164 } });
+  } catch (err: any) {
+    if (err?.code === 'P2002') {
+      res.status(409).json({ error: 'line_number_taken' });
+      return;
+    }
+    throw err;
+  }
+});
+
+/** PATCH /admin/lines/:id — edit a line: name, active state, and/or RC account. */
+const UpdateLineSchema = z.object({
+  name: z.string().min(1).optional(),
+  phone_e164: z.string().min(3).optional(),
+  is_active: z.boolean().optional(),
+  ...RcFields,
+});
+adminRouter.patch('/lines/:id', async (req, res) => {
+  const parsed = UpdateLineSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'invalid_body', details: parsed.error.flatten() });
+    return;
+  }
+  const existing = await prisma.line.findUnique({ where: { id: req.params.id } });
+  if (!existing) {
+    res.status(404).json({ error: 'line_not_found' });
+    return;
+  }
+  const d = parsed.data;
+  try {
+    const line = await prisma.line.update({
+      where: { id: req.params.id },
+      data: {
+        ...(d.name !== undefined ? { name: d.name } : {}),
+        ...(d.phone_e164 !== undefined ? { phoneE164: d.phone_e164 } : {}),
+        ...(d.is_active !== undefined ? { isActive: d.is_active } : {}),
+        ...rcData(d),
+      },
+    });
+    await writeAudit({ actorType: 'admin', action: 'line_updated', entityType: 'line', entityId: line.id, details: { name: line.name, rc: Boolean(line.rcClientId) } });
+    res.json({ ok: true, line: { id: line.id, name: line.name, phone: line.phoneE164, rc_configured: Boolean(line.rcClientId && line.rcJwt) } });
   } catch (err: any) {
     if (err?.code === 'P2002') {
       res.status(409).json({ error: 'line_number_taken' });

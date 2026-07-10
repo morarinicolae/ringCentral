@@ -28,6 +28,17 @@ model Line {
   phoneE164  String   @unique @map("phone_e164")
   name       String
   isActive   Boolean  @default(true) @map("is_active")
+
+  // Per-line RingCentral account. Each number can live on its OWN RingCentral
+  // account (its own app credentials + JWT). When these are null the line uses
+  // the global RINGCENTRAL_* env account. rcFromNumber defaults to phoneE164.
+  // Secrets live in the local DB (single-tenant tool on the owner's VPS).
+  rcClientId     String?  @map("rc_client_id")
+  rcClientSecret String?  @map("rc_client_secret")
+  rcJwt          String?  @map("rc_jwt")
+  rcServerUrl    String?  @map("rc_server_url")
+  rcUseA2p       Boolean? @map("rc_use_a2p")
+
   createdAt  DateTime @default(now()) @map("created_at")
   updatedAt  DateTime @updatedAt @map("updated_at")
 
