@@ -102,31 +102,34 @@ function onMessage(raw: string): void {
   }
   const meta = Array.isArray(frame) ? frame[0] : frame;
   const body = Array.isArray(frame) ? frame[1] : undefined;
-  // DEBUG: log every frame so we can see exactly what the gateway sends.
-  logger.info('ws_frame', { type: meta?.type, status: meta?.status, body: JSON.stringify(body ?? {}).slice(0, 220) });
-  switch (meta?.type) {
-    case 'ConnectionDetails':
-      logger.info('ws_connected', { recoveryState: meta.recoveryState });
-      createSubscription();
-      break;
-    case 'ClientRequestSuccess':
-      // Any successful ClientRequest that returns a subscription (has an id).
-      if (body?.id) {
-        subscriptionId = body.id;
-        logger.info('ws_subscribed', { id: body.id, expiresIn: body.expiresIn, filters: body.eventFilters });
-        scheduleRenew(body.expiresIn);
-      }
-      break;
-    case 'ClientRequestError':
-      logger.error('ws_request_error', { status: meta.status, body: JSON.stringify(body).slice(0, 300) });
-      break;
-    case 'ServerNotification':
-      if (typeof body?.event === 'string' && body.event.includes('telephony/sessions') && body.body) {
-        handleTelephonyBody(body.body).catch(() => {});
-      }
-      break;
-    default:
-      break;
+  const type = meta?.type;
+
+  // Subscription create/renew confirmation: the WSG returns the subscription
+  // object (id + eventFilters), and labels the frame 'ClientRequest' (echoed),
+  // NOT a distinct success type — so detect it by shape, not by label.
+  if (body && typeof body === 'object' && body.id && Array.isArray(body.eventFilters)) {
+    if (subscriptionId !== body.id) logger.info('ws_subscribed', { id: body.id, status: body.status, expiresIn: body.expiresIn });
+    subscriptionId = body.id;
+    scheduleRenew(body.expiresIn);
+    return;
+  }
+
+  if (type === 'ConnectionDetails') {
+    logger.info('ws_connected', {});
+    createSubscription();
+    return;
+  }
+
+  if (type === 'ServerNotification') {
+    if (typeof body?.event === 'string' && body.event.includes('telephony/sessions') && body.body) {
+      handleTelephonyBody(body.body).catch(() => {});
+    }
+    return;
+  }
+
+  // Any request that came back with an error status.
+  if (meta?.status && Number(meta.status) >= 400) {
+    logger.error('ws_request_error', { status: meta.status, body: JSON.stringify(body ?? {}).slice(0, 300) });
   }
 }
 
