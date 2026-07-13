@@ -76,12 +76,12 @@ const HTML = /* html */ `<!doctype html>
   <section>
     <h2>Vânzători</h2>
     <table id="sellerTable"><thead>
-      <tr><th>Nume</th><th>Numere &amp; topic-uri</th><th>Telegram ID (grup/chat)</th><th>Mobil (transfer apel)</th><th>Activ</th><th></th></tr>
+      <tr><th>Nume</th><th>Numere &amp; topic-uri</th><th>Telegram ID (grup/chat)</th><th>Mobil / extensie RC (unde sună)</th><th>Activ</th><th></th></tr>
     </thead><tbody></tbody></table>
     <div class="row" style="margin-top:12px">
       <input id="nName" placeholder="Nume" style="width:110px" />
       <input id="nTg" placeholder="Telegram ID / grup (-100…)" style="width:180px" />
-      <input id="nPhone" placeholder="Mobil +373… (apel)" style="width:150px" />
+      <input id="nPhone" placeholder="ext RC (201) sau mobil +1…" style="width:180px" />
       <select id="nLine"></select>
       <input id="nTopic" placeholder="Topic ID (opțional)" style="width:130px" />
       <button onclick="createSeller()">+ Adaugă vânzător</button>
@@ -177,7 +177,7 @@ function renderSellers(rows) {
     '<tr><td>'+esc(s.name)+'</td><td>'+numbers(s)+'</td>'
     + '<td class="row"><input id="tg_'+s.id+'" value="'+esc(s.telegramUserId||'')+'" placeholder="ID / grup -100…" style="width:150px" />'
     + '<button class="ghost" onclick="saveTg(\\''+s.id+'\\')">💾</button></td>'
-    + '<td class="row"><input id="ph_'+s.id+'" value="'+esc(s.phone_e164||'')+'" placeholder="+373…" style="width:120px" />'
+    + '<td class="row"><input id="ph_'+s.id+'" value="'+esc(s.phone_e164||'')+'" placeholder="ext 201 sau +1…" style="width:130px" />'
     + '<button class="ghost" onclick="savePhone(\\''+s.id+'\\')">💾</button></td>'
     + '<td><span class="pill '+(s.isActive?'active':'inactive')+'">'+(s.isActive?'activ':'inactiv')+'</span></td>'
     + '<td><button class="ghost" onclick="toggle(\\''+s.id+'\\','+(!s.isActive)+')">'+(s.isActive?'Dezactivează':'Activează')+'</button></td></tr>').join('')
