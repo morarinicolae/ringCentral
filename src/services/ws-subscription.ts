@@ -33,8 +33,33 @@ let subscriptionId: string | null = null;
 let hbTimer: NodeJS.Timeout | null = null;
 let renewTimer: NodeJS.Timeout | null = null;
 
-const wsUrl = () => (process.env.RINGCENTRAL_WS_URL || 'wss://ws.ringcentral.com/ws').trim();
 const newMsgId = () => `router-${Date.now()}-${++msgCounter}`;
+
+/**
+ * RingCentral WebSocket handshake: POST /restapi/oauth/wstoken returns the WS
+ * gateway URI + a short-lived ws access token. You connect to that URI with the
+ * ws token (NOT the plain OAuth access token, and NOT a fixed URL — that 404s).
+ * Requires the app `WebSocket` permission.
+ */
+async function getWsEndpoint(): Promise<{ url: string } | null> {
+  const rc = globalRcConfig();
+  const token = await getAccessTokenFor(rc);
+  const r = await fetch(`${rc.serverUrl}/restapi/oauth/wstoken`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+  });
+  const j: any = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    logger.error('ws_token_failed', { status: r.status, body: JSON.stringify(j).slice(0, 200) });
+    return null;
+  }
+  const uri: string = j.uri || (process.env.RINGCENTRAL_WS_URL ?? '');
+  const wsToken: string = j.ws_access_token || j.wsAccessToken || '';
+  if (!uri) return null;
+  // Append the ws token unless the uri already carries it.
+  const url = /access_token=/.test(uri) || !wsToken ? uri : `${uri}${uri.includes('?') ? '&' : '?'}access_token=${encodeURIComponent(wsToken)}`;
+  return { url };
+}
 
 function clearTimers(): void {
   if (hbTimer) clearInterval(hbTimer);
@@ -112,10 +137,13 @@ function scheduleReconnect(): void {
 
 async function connect(): Promise<void> {
   if (stopped) return;
-  const token = await getAccessTokenFor(globalRcConfig());
-  const url = `${wsUrl()}?access_token=${encodeURIComponent(token)}`;
-  logger.info('ws_connecting', { url: wsUrl() });
-  ws = new WebSocket(url);
+  const endpoint = await getWsEndpoint();
+  if (!endpoint) {
+    scheduleReconnect();
+    return;
+  }
+  logger.info('ws_connecting', { url: endpoint.url.split('?')[0] });
+  ws = new WebSocket(endpoint.url);
 
   ws.on('open', () => {
     reconnectDelay = 1000;
