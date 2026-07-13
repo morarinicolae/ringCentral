@@ -28,6 +28,10 @@ export const config = {
   // When true the server also runs the in-process polling bridge (Telegram +
   // A2P inbound). Lets a single process work without a public webhook URL.
   pollMode: ['1', 'true', 'yes', 'on'].includes((process.env.POLL_MODE ?? '').trim().toLowerCase()),
+  // TUNNEL-FREE live calls: receive telephony events over an OUTBOUND WebSocket
+  // to RingCentral (no public webhook URL / no tunnel). Falls back to the
+  // WebHook + tunnel path when false.
+  wsMode: ['1', 'true', 'yes', 'on'].includes((process.env.RINGCENTRAL_WS ?? '').trim().toLowerCase()),
 
   // TEST_MODE: never send real SMS unless ALLOW_REAL_SMS is also true.
   testMode: bool(process.env.TEST_MODE, true),

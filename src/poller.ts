@@ -3,6 +3,7 @@ import { prisma } from './db';
 import { getAccessTokenFor, rcConfigForLine, rcAccountKey, RcConfig } from './services/ringcentral';
 import { processInboundCall } from './services/calls';
 import { ensureTelephonySubscription } from './services/call-control';
+import { startWebSocketTransport } from './services/ws-subscription';
 import { syncQueueRuleForSeller } from './services/queue-rules';
 import { logger } from './logger';
 
@@ -261,19 +262,25 @@ export async function startPolling(): Promise<void> {
       /* ignore */
     }
   }
-  // Live call transfer: keep a telephony webhook subscription alive when a
-  // public base URL is configured (the tunnel). Self-heals every 6h.
-  const telephonyWebhook = config.appBaseUrl ? `${config.appBaseUrl.replace(/\/$/, '')}/webhooks/ringcentral/telephony` : '';
-  if (/^https:\/\//.test(telephonyWebhook)) {
-    ensureTelephonySubscription(telephonyWebhook)
-      .then((r) => logger.info('telephony_subscription_ensured', { ok: r.ok, created: r.created, id: r.id }))
-      .catch(() => {});
-    setInterval(() => {
-      ensureTelephonySubscription(telephonyWebhook).catch(() => {});
-    }, 6 * 3600 * 1000);
+  // Live call transfer transport:
+  //  - WS mode (preferred): outbound WebSocket to RingCentral — NO tunnel.
+  //  - else WebHook mode: keep a webhook subscription alive at APP_BASE_URL
+  //    (the tunnel), self-healing every 6h.
+  if (config.wsMode) {
+    startWebSocketTransport().catch((e) => logger.error('ws_start_error', { error: e instanceof Error ? e.message : String(e) }));
+  } else {
+    const telephonyWebhook = config.appBaseUrl ? `${config.appBaseUrl.replace(/\/$/, '')}/webhooks/ringcentral/telephony` : '';
+    if (/^https:\/\//.test(telephonyWebhook)) {
+      ensureTelephonySubscription(telephonyWebhook)
+        .then((r) => logger.info('telephony_subscription_ensured', { ok: r.ok, created: r.created, id: r.id }))
+        .catch(() => {});
+      setInterval(() => {
+        ensureTelephonySubscription(telephonyWebhook).catch(() => {});
+      }, 6 * 3600 * 1000);
+    }
   }
 
-  logger.info('polling_started', { telegram: Boolean(config.telegram.botToken), sms: true, calls: true, liveTransfer: Boolean(telephonyWebhook) });
+  logger.info('polling_started', { telegram: Boolean(config.telegram.botToken), sms: true, calls: true, transport: config.wsMode ? 'websocket' : 'webhook' });
   setInterval(pollTelegramOnce, 3000);
   setInterval(pollInboundSmsOnce, 8000);
   setInterval(pollCallsOnce, 15000);
