@@ -102,15 +102,18 @@ function onMessage(raw: string): void {
   }
   const meta = Array.isArray(frame) ? frame[0] : frame;
   const body = Array.isArray(frame) ? frame[1] : undefined;
+  // DEBUG: log every frame so we can see exactly what the gateway sends.
+  logger.info('ws_frame', { type: meta?.type, status: meta?.status, body: JSON.stringify(body ?? {}).slice(0, 220) });
   switch (meta?.type) {
     case 'ConnectionDetails':
       logger.info('ws_connected', { recoveryState: meta.recoveryState });
       createSubscription();
       break;
     case 'ClientRequestSuccess':
-      if (body?.eventFilters) {
-        subscriptionId = body.id ?? subscriptionId;
-        logger.info('ws_subscribed', { id: body.id, expiresIn: body.expiresIn });
+      // Any successful ClientRequest that returns a subscription (has an id).
+      if (body?.id) {
+        subscriptionId = body.id;
+        logger.info('ws_subscribed', { id: body.id, expiresIn: body.expiresIn, filters: body.eventFilters });
         scheduleRenew(body.expiresIn);
       }
       break;
