@@ -23,6 +23,12 @@ export const config = {
   nodeEnv: process.env.NODE_ENV ?? 'development',
   isTest: (process.env.NODE_ENV ?? 'development') === 'test',
   port: int(process.env.PORT, 3000),
+  // Interface the HTTP server binds to. Defaults to 127.0.0.1 (localhost only)
+  // so the admin panel is reachable ONLY through an SSH tunnel — even if the
+  // host firewall leaves the port open, nothing listens on the public
+  // interface. Set BIND_HOST=0.0.0.0 for Docker/reverse-proxy deploys where a
+  // separate container or host must reach the app over the network.
+  bindHost: (process.env.BIND_HOST ?? '127.0.0.1').trim(),
   databaseUrl: process.env.DATABASE_URL ?? 'file:./dev.db',
   appBaseUrl: process.env.APP_BASE_URL ?? '',
   // When true the server also runs the in-process polling bridge (Telegram +

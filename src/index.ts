@@ -6,9 +6,10 @@ import { startPolling } from './poller';
 function main(): void {
   assertConfig();
   const app = createServer();
-  app.listen(config.port, () => {
+  app.listen(config.port, config.bindHost, () => {
     logger.info('server_started', {
       port: config.port,
+      host: config.bindHost,
       env: config.nodeEnv,
       testMode: config.testMode,
       allowRealSms: config.allowRealSms,
@@ -17,7 +18,7 @@ function main(): void {
     // Always visible, even in non-test: a friendly boot line.
     // eslint-disable-next-line no-console
     console.log(
-      `SMS router listening on :${config.port} (env=${config.nodeEnv}, TEST_MODE=${config.testMode}, ALLOW_REAL_SMS=${config.allowRealSms}, POLL_MODE=${config.pollMode})`,
+      `SMS router listening on ${config.bindHost}:${config.port} (env=${config.nodeEnv}, TEST_MODE=${config.testMode}, ALLOW_REAL_SMS=${config.allowRealSms}, POLL_MODE=${config.pollMode})`,
     );
     // Single-process deploy: also poll Telegram + A2P inbound (no public URL needed).
     if (config.pollMode) {
