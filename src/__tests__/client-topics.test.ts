@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { resetDb, seedSellers, inbound, buildReply } from './helpers';
 import { processSellerReply } from '../services/reply';
 import { processInboundCall } from '../services/calls';
+import { migrateClientTopic } from '../services/client-topics';
 import { telegramOutbox } from '../services/telegram';
 import { prisma } from '../db';
 import { TEST_LINE_NUMBER } from './helpers';
@@ -72,5 +73,49 @@ describe('per-client topics (thread per client in the seller group)', () => {
     );
     expect(res.outcome).toBe('test_sent');
     expect(res.replyText).toContain('+15550001111');
+  });
+
+  it('reassigning a client MOVES the topic to the new seller group (old id dropped, note posted)', async () => {
+    const GROUP2 = '-100888';
+    await inbound('+15550001111', 'salut');
+    const contact = await prisma.contact.findFirst({ where: { phoneE164: '+15550001111' } });
+    const oldTopic = contact!.telegramTopicId!;
+    expect(oldTopic).toBeTruthy();
+
+    telegramOutbox.length = 0; // isolate the migration output
+    const newTopic = await migrateClientTopic(
+      contact!.id,
+      '+15550001111',
+      { name: 'Ana', telegramUserId: GROUP },
+      { name: 'Bogdan', telegramUserId: GROUP2 },
+      oldTopic,
+    );
+
+    // A fresh topic in the NEW group, different from the old one.
+    expect(newTopic).toBeTruthy();
+    expect(newTopic).not.toBe(oldTopic);
+    const moved = await prisma.contact.findFirst({ where: { phoneE164: '+15550001111' } });
+    expect(moved?.telegramTopicId).toBe(newTopic);
+
+    // A "moved here" note lands in the new group's new topic.
+    const note = telegramOutbox.find((o) => o.chatId === GROUP2 && o.text.includes('mutat'));
+    expect(note?.messageThreadId).toBe(newTopic);
+  });
+
+  it('reassigning to a 1:1 seller (not a group) just clears the stale topic id', async () => {
+    await inbound('+15550001111', 'salut');
+    const contact = await prisma.contact.findFirst({ where: { phoneE164: '+15550001111' } });
+    expect(contact!.telegramTopicId).toBeTruthy();
+
+    const newTopic = await migrateClientTopic(
+      contact!.id,
+      '+15550001111',
+      { name: 'Ana', telegramUserId: GROUP },
+      { name: 'Bogdan', telegramUserId: '424242' }, // 1:1 chat, not a group
+      contact!.telegramTopicId!,
+    );
+    expect(newTopic).toBeNull();
+    const cleared = await prisma.contact.findFirst({ where: { phoneE164: '+15550001111' } });
+    expect(cleared?.telegramTopicId).toBeNull();
   });
 });

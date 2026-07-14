@@ -7,6 +7,7 @@ import { logger } from '../logger';
 import { ringCentralDiagnostic } from '../services/ringcentral-connect';
 import { config } from '../config';
 import { createTelephonySubscription, listSubscriptions, deleteSubscription } from '../services/call-control';
+import { migrateClientTopic } from '../services/client-topics';
 
 export const adminRouter = Router();
 adminRouter.use(requireAdmin);
@@ -197,18 +198,34 @@ adminRouter.post('/reassign-conversation', async (req, res) => {
   }
 
   const previousSellerId = conversation.assignedSellerId;
+  // Capture the client's CURRENT per-client topic + old seller BEFORE the move,
+  // so we can migrate the Telegram thread to the new seller's group afterwards.
+  const contact = await prisma.contact.findUnique({ where: { id: conversation.contactId } });
+  const oldSeller = previousSellerId ? await prisma.seller.findUnique({ where: { id: previousSellerId } }) : null;
+  const oldTopicId = contact?.telegramTopicId ?? null;
+
   // Move BOTH the conversation and the contact so future inbound messages from
   // the same number also route to the new seller (ownership stays consistent).
   await prisma.$transaction([
     prisma.conversation.update({ where: { id: conversation_id }, data: { assignedSellerId: new_seller_id } }),
     prisma.contact.update({ where: { id: conversation.contactId }, data: { assignedSellerId: new_seller_id } }),
   ]);
+
+  // Migrate the client's Telegram topic: delete it from the old seller's group
+  // and recreate it in the new seller's group (best-effort — never blocks the
+  // reassignment). Skipped when the seller didn't actually change.
+  if (previousSellerId !== new_seller_id && contact) {
+    await migrateClientTopic(contact.id, contact.phoneE164, oldSeller, seller, oldTopicId).catch((e) =>
+      logger.warn('client_topic_migrate_failed', { conversationId: conversation_id, error: e instanceof Error ? e.message : String(e) }),
+    );
+  }
+
   await writeAudit({
     actorType: 'admin',
     action: 'conversation_reassigned',
     entityType: 'conversation',
     entityId: conversation_id,
-    details: { from: previousSellerId, to: new_seller_id },
+    details: { from: previousSellerId, to: new_seller_id, oldTopicId },
   });
   logger.info('conversation_reassigned', { conversationId: conversation_id, from: previousSellerId, to: new_seller_id });
 

@@ -58,6 +58,30 @@ export async function createForumTopic(chatId: string, name: string): Promise<st
 }
 
 /**
+ * Delete a forum topic (and its messages) from a group. Used when a client is
+ * reassigned to another seller: their per-client topic is removed from the old
+ * seller's group and recreated in the new one. Requires the bot to have the
+ * "Manage Topics" admin permission in that group. Best-effort — returns false
+ * on failure instead of throwing, so a reassignment never blocks on it.
+ */
+export async function deleteForumTopic(chatId: string, threadId: string): Promise<boolean> {
+  if (usingMock()) return true;
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${config.telegram.botToken}/deleteForumTopic`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, message_thread_id: Number(threadId) }),
+    });
+    const json = (await res.json()) as { ok: boolean; description?: string };
+    if (!json.ok) logger.warn('telegram_delete_topic_failed', { chatId, threadId, error: json.description });
+    return Boolean(json.ok);
+  } catch (err) {
+    logger.warn('telegram_delete_topic_failed', { chatId, threadId, error: err instanceof Error ? err.message : String(err) });
+    return false;
+  }
+}
+
+/**
  * Send a Telegram message to a seller.
  * `chatId` is the seller's Telegram target — either a 1:1 chat id (== their
  * telegram_user_id) or a group/forum chat id (negative). `messageThreadId`, when
